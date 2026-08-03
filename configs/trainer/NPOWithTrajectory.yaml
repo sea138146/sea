@@ -1,0 +1,16 @@
+defaults:
+  - NPO
+
+handler: NPOWithTrajectory
+
+method_args:
+  beta: 0.1
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+
+  # Logging only. These values do not change the NPO objective.
+  trajectory_log_interval: 50
+  ratio_window_size: 3
+  reference_min_gain: 1.0e-8
+  epsilon: 1.0e-8

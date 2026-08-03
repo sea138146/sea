@@ -1,0 +1,28 @@
+defaults:
+  - NPO
+
+handler: SampleEarlyStopNPOLoss
+
+args:
+  dataloader_drop_last: false
+
+method_args:
+  beta: 0.1
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+
+  # m_i^(t) is the unreduced per-sample NPO loss.
+  stop_threshold: 1.0e-3
+
+  # Two consecutive stable checks:
+  # first possible stop decision after epoch 4,
+  # effective from epoch 5.
+  stable_checks: 2
+
+  # Reactivation uses a wider threshold to avoid oscillation.
+  rebound_multiplier: 2.0
+  rebound_checks: 2
+
+  # First run only records the NPO-loss trajectory.
+  calibration_only: true

@@ -1,0 +1,2 @@
+split,method,tag,checkpoint,FQ,MU,Fluency,EM,ES,F-TR,Ra-TR,R-TR,Rw-TR,summary_path
+forget01,lr1e-5_b8_mb4_ga2_e5,checkpoint-25,evals,0.006760732303569208,0.62115255958452,,0.8885484844446182,0.2127717367043775,0.5342587885324429,0.6095100465571455,0.4577483734574077,0.5590451539926513,saves/unlearn/tofu/forget01/Llama-2-7b-chat-hf/NPO/lr1e-5_b8_mb4_ga2_e5/checkpoint-25/evals/TOFU_SUMMARY.json

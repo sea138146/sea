@@ -1,0 +1,19 @@
+defaults:
+  - NPO
+
+handler: SampleEarlyStopNPO
+
+args:
+  # Every active forget sample must appear once per epoch.
+  dataloader_drop_last: false
+
+method_args:
+  beta: 0.1
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+
+  # Official IES defaults.
+  threshold: 1.0e-3
+  moving_average_rate: 2
+  k: 1

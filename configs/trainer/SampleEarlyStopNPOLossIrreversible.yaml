@@ -1,0 +1,19 @@
+defaults:
+  - NPO
+
+handler: SampleEarlyStopNPOLossIrreversible
+
+args:
+  dataloader_drop_last: false
+
+method_args:
+  beta: 0.1
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+
+  # m_i^(t) = unreduced per-sample NPO loss.
+  stop_threshold: 1.0e-5
+
+  # Require consecutive stable second-difference checks.
+  stable_checks: 2
