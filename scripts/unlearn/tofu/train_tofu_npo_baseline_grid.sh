@@ -25,15 +25,15 @@ EVAL_ROOT="/model/evals"
 
 splits=(
 #    "forget01 holdout01 retain99"
-#    "forget05 holdout05 retain95"
-    "forget10 holdout10 retain90"
+    "forget05 holdout05 retain95"
+#    "forget10 holdout10 retain90"
 )
 
 lr_set=(
     "2e-5"
+    "5e-5"
 )
 
-# per-device batch size=4, gradient accumulation=2
 bz_set=(
     "4 2"
 )
