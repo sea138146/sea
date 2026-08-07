@@ -5,6 +5,7 @@ handler: SampleEarlyStopNPOLossIrreversible
 
 args:
   dataloader_drop_last: false
+  dataloader_num_workers: 0
 
 method_args:
   beta: 0.1
@@ -12,8 +13,17 @@ method_args:
   gamma: 1.0
   retain_loss_type: NLL
 
-  # m_i^(t) = unreduced per-sample NPO loss.
-  stop_threshold: 1.0e-5
+  # Epochs 1-2 only record NLL gain. Decisions start at epoch 3.
+  warm_up: 2
 
-  # Require consecutive stable second-difference checks.
-  stable_checks: 2
+  # Permanently stop after patience consecutive post-warm-up epochs where the
+  # per-sample length-normalized NLL gain is greater than or equal to 2.0.
+  gain_threshold: 2.0
+  patience: 2
+
+  # Optional split/model-specific cache. When present it is validated and
+  # loaded; when absent it is generated atomically from the fixed model.
+  initial_nll_cache_path: null
+
+  # Stopped samples remain excluded from forget loss but receive one
+  # forward-only normalized-NLL snapshot at every epoch end. No reactivation.

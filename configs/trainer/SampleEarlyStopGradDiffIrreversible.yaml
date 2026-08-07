@@ -1,0 +1,15 @@
+defaults:
+  - GradDiff
+
+handler: SampleEarlyStopGradDiffIrreversible
+
+args:
+  dataloader_drop_last: false
+
+method_args:
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+
+  # Stable when mean(abs(latest 3 second differences)) <= stop_threshold.
+  stop_threshold: 1.0e-2

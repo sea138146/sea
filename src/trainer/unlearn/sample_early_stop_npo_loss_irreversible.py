@@ -1,414 +1,611 @@
 import json
+import math
 import os
-from collections import defaultdict
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Sampler
+from torch.utils.data import DataLoader, IterableDataset
 from transformers import TrainerCallback
 
 from trainer.unlearn.npo import NPO
 from trainer.utils import compute_batch_nll
 
 
-class SampleEarlyStopNPOLossIrreversible(NPO):
-    """Irreversible sample stopping based on per-sample NPO loss curvature.
+class _IndependentStreams(IterableDataset):
+    """Fixed retain epoch with a dynamically shrinking forget stream."""
 
-    Monitoring signal:
-        m_i^(t) = l_NPO,i^(t)
+    def __init__(self, owner, batch_size):
+        self.owner = owner
+        self.batch_size = int(batch_size)
+        self.epoch = 0
+        self.steps = math.ceil(owner.num_forget_samples / self.batch_size)
 
-    Second difference:
-        d2_i^(t) = m_i^(t) - 2*m_i^(t-1) + m_i^(t-2)
+    def __len__(self):
+        return self.steps
 
-    A sample is permanently stopped after ``stable_checks`` consecutive
-    observations satisfying:
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
 
-        abs(d2_i^(t)) <= stop_threshold
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(
+            self.owner.args.seed + self.epoch
+        )
+        active = sorted(self.owner.active_samples)
+        if active:
+            order = torch.randperm(len(active), generator=generator).tolist()
+            active = [active[position] for position in order]
+        forget_batches = [
+            active[start : start + self.batch_size]
+            for start in range(0, len(active), self.batch_size)
+        ]
+        slots = torch.randperm(self.steps, generator=generator).tolist()
+        forget_by_slot = dict(zip(slots, forget_batches))
 
-    The observation that completes the stable streak still participates in the
-    current epoch. Stopping becomes effective from the next epoch.
-
-    Once stopped, a sample is removed from the training sampler permanently.
-    It receives no further current-model forward, reference-model forward,
-    NPO-loss computation, backward pass, or trajectory observation.
-    """
-
-    class _MutableSubsetRandomSampler(Sampler):
-        def __init__(self, indices, seed=0):
-            self.indices = list(indices)
-            self.seed = int(seed)
-            self.epoch = 0
-
-        def update(self, indices):
-            self.indices = list(indices)
-
-        def set_epoch(self, epoch):
-            self.epoch = int(epoch)
-
-        def __iter__(self):
-            if not self.indices:
-                return iter(())
-
-            generator = torch.Generator()
-            generator.manual_seed(self.seed + self.epoch)
-
-            order = torch.randperm(
-                len(self.indices),
-                generator=generator,
-            ).tolist()
-
-            return iter(
-                self.indices[position]
-                for position in order
+        retain_ids = []
+        while len(retain_ids) < self.steps * self.batch_size:
+            retain_ids.extend(
+                torch.randperm(
+                    len(self.owner.retain_dataset), generator=generator
+                ).tolist()
             )
 
-        def __len__(self):
-            return len(self.indices)
+        for step in range(self.steps):
+            start = step * self.batch_size
+            batch = {
+                "retain": self.owner.data_collator(
+                    [
+                        self.owner.retain_dataset[index]
+                        for index in retain_ids[start : start + self.batch_size]
+                    ]
+                )
+            }
+            # The active set may change at a sub-epoch monitoring point.
+            forget_ids = [
+                index
+                for index in forget_by_slot.get(step, [])
+                if index in self.owner.active_samples
+            ]
+            if forget_ids:
+                batch["forget"] = self.owner.data_collator(
+                    [self.owner.forget_dataset[index] for index in forget_ids]
+                )
+            yield batch
 
-    class _EpochEndCallback(TrainerCallback):
+
+def _identity(value):
+    return value
+
+
+class SampleEarlyStopNPOLossIrreversible(NPO):
+    """Irreversible per-sample stopping based on normalized-NLL gain.
+
+    Epochs up to and including warm_up only record trajectories. After
+    warm-up, a sample is permanently removed from forget updates when its
+    length-normalized NLL gain is greater than or equal to gain_threshold for
+    patience consecutive epoch-end snapshots. Retain updates
+    continue for every original training step.
+    """
+
+    class _NLLGainEpochEndCallback(TrainerCallback):
         def __init__(self, owner):
             self.owner = owner
 
-        def on_epoch_end(
-            self,
-            args,
-            state,
-            control,
-            model=None,
-            **kwargs,
-        ):
-            self.owner._finalize_epoch()
+        def on_epoch_end(self, args, state, control, model=None, **kwargs):
+            self.owner._finalize_nll_gain_epoch(model=model)
             return control
 
     def __init__(
         self,
-        stop_threshold=1.0e-5,
-        stable_checks=2,
+        warm_up=2,
+        gain_threshold=2.0,
+        patience=2,
+        initial_nll_cache_path=None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-
-        if float(stop_threshold) < 0.0:
-            raise ValueError(
-                "stop_threshold must be non-negative"
-            )
-
-        if int(stable_checks) < 1:
-            raise ValueError(
-                "stable_checks must be at least 1"
-            )
-
+        self.warm_up = int(warm_up)
+        self.gain_threshold = float(gain_threshold)
+        self.patience = int(patience)
+        self.initial_nll_cache_path = (
+            os.path.abspath(os.path.expanduser(initial_nll_cache_path))
+            if initial_nll_cache_path
+            else None
+        )
+        if self.warm_up < 0:
+            raise ValueError("warm_up must be non-negative")
+        if self.gain_threshold < 0:
+            raise ValueError("gain_threshold must be non-negative")
+        if self.patience < 1:
+            raise ValueError("patience must be >= 1")
         if self.accelerator.num_processes != 1:
             raise RuntimeError(
-                "Dynamic irreversible stopping currently supports "
-                "single-process training only."
+                "SampleEarlyStopNPOLossIrreversible currently supports one process"
             )
-
-        if self.train_dataset is None:
+        if int(self.args.dataloader_num_workers) != 0:
             raise RuntimeError(
-                "train_dataset is required"
+                "SampleEarlyStopNPOLossIrreversible requires dataloader_num_workers=0"
             )
-
-        if getattr(self.train_dataset, "anchor", None) != "forget":
+        if not hasattr(self.train_dataset, "forget") or not hasattr(
+            self.train_dataset, "retain"
+        ):
             raise RuntimeError(
-                "The training dataset must use data.anchor=forget."
+                "train_dataset must expose forget and retain datasets"
             )
-
-        if not hasattr(self.train_dataset, "forget"):
-            raise RuntimeError(
-                "train_dataset must expose the forget dataset."
-            )
-
-        self.stop_threshold = float(stop_threshold)
-        self.stable_checks = int(stable_checks)
 
         self.forget_dataset = self.train_dataset.forget
+        self.retain_dataset = self.train_dataset.retain
         self.num_forget_samples = len(self.forget_dataset)
+        if self.num_forget_samples == 0:
+            raise RuntimeError("forget dataset must be non-empty")
+        if self.retain_dataset is None or len(self.retain_dataset) == 0:
+            raise RuntimeError("retain dataset must be non-empty")
 
-        self.all_sample_indices = set(
-            range(self.num_forget_samples)
-        )
-        self.active_samples = set(
-            self.all_sample_indices
-        )
+        self.all_sample_indices = set(range(self.num_forget_samples))
+        self.active_samples = set(self.all_sample_indices)
         self.stopped_samples = set()
-
-        # m_i^(t) = unreduced per-sample NPO loss.
-        self.npo_loss_history = {
-            idx: []
-            for idx in range(self.num_forget_samples)
+        self.initial_sample_nll = {}
+        self.sample_nll_history = {
+            index: [] for index in self.all_sample_indices
         }
-        self.second_difference_history = {
-            idx: []
-            for idx in range(self.num_forget_samples)
+        self.nll_gain_history = {
+            index: [] for index in self.all_sample_indices
         }
-
-        self.stable_streak = defaultdict(int)
+        self.gain_streak = {
+            index: 0 for index in self.all_sample_indices
+        }
         self.stop_epoch = {}
-        self.stop_score = {}
-
-        self._active_sampler = None
+        self.stop_nll = {}
+        self.stop_gain = {}
         self._last_finalized_epoch = 0
+        self._saved_forget_instances = 0
+        self._stream = None
 
-        # Number of stopped sample occurrences that were completely skipped.
-        self._saved_sample_computations = 0
-
-        os.makedirs(
+        os.makedirs(self.args.output_dir, exist_ok=True)
+        self.initial_state_path = os.path.join(
             self.args.output_dir,
-            exist_ok=True,
+            "ies_nll_gain_initial_state.json",
         )
-
         self.history_path = os.path.join(
             self.args.output_dir,
-            "ies_npo_loss_irreversible_history.jsonl",
+            "ies_nll_gain_history.jsonl",
         )
         self.state_path = os.path.join(
             self.args.output_dir,
-            "ies_npo_loss_irreversible_state.json",
+            "ies_nll_gain_state.json",
         )
-
         if self.is_world_process_zero():
-            open(
-                self.history_path,
-                "w",
-                encoding="utf-8",
-            ).close()
+            open(self.history_path, "w", encoding="utf-8").close()
 
-        self.add_callback(
-            self._EpochEndCallback(self)
-        )
-
+        self._scan_initial_sample_nll()
+        self.add_callback(self._NLLGainEpochEndCallback(self))
         print(
-            "[IES-NPO-Irreversible] "
-            f"stop_threshold={self.stop_threshold}, "
-            f"stable_checks={self.stable_checks}, "
-            "reactivation=false, "
-            "stopped_sample_monitoring=false"
+            "[IES-NPO-NLL-Gain] "
+            f"warm_up={self.warm_up} "
+            f"gain_threshold={self.gain_threshold} "
+            f"patience={self.patience} "
+            "rebound=false retain_stream=fixed",
+            flush=True,
         )
 
     @staticmethod
-    def _model_inputs(batch):
+    def _gain_model_inputs(batch):
         return {
-            "input_ids": batch["input_ids"],
-            "attention_mask": batch["attention_mask"],
-            "labels": batch["labels"],
+            key: batch[key]
+            for key in ("input_ids", "attention_mask", "labels")
         }
 
-    def _get_train_sampler(self):
-        self._active_sampler = (
-            self._MutableSubsetRandomSampler(
-                sorted(self.active_samples),
-                seed=int(self.args.seed),
+    @staticmethod
+    def _gain_token_mean_nll(sequence_nll, labels):
+        # compute_batch_nll returns one token-summed NLL per sequence.
+        # Divide exactly once here to obtain mean NLL per valid token.
+        valid_token_count = (
+            labels[..., 1:].ne(-100).sum(dim=-1).clamp_min(1)
+        )
+        return sequence_nll / valid_token_count.to(sequence_nll.dtype)
+
+    @staticmethod
+    def _gain_slice_batch(batch, positions):
+        return {
+            key: value.index_select(0, positions.to(value.device))
+            for key, value in batch.items()
+            if torch.is_tensor(value)
+        }
+
+    def _scan_sample_nll(self, model, indices):
+        model = model if model is not None else self.model
+        indices = sorted(indices)
+        if not indices:
+            return {}
+        loader = DataLoader(
+            self.forget_dataset,
+            batch_size=int(self.args.per_device_train_batch_size),
+            sampler=indices,
+            drop_last=False,
+            num_workers=0,
+            collate_fn=self.data_collator,
+        )
+        model_device = next(model.parameters()).device
+        if model_device != self.accelerator.device:
+            model.to(self.accelerator.device)
+        was_training = model.training
+        model.eval()
+        observed = {}
+        try:
+            with torch.no_grad():
+                for batch in loader:
+                    if "index" not in batch:
+                        raise RuntimeError(
+                            "forget samples require index values"
+                        )
+                    batch = self._prepare_inputs(batch)
+                    model_inputs = self._gain_model_inputs(batch)
+                    with self.compute_loss_context_manager():
+                        sequence_nll, _ = compute_batch_nll(
+                            model, model_inputs
+                        )
+                    values = self._gain_token_mean_nll(
+                        sequence_nll, model_inputs["labels"]
+                    ).detach().float().cpu().tolist()
+                    sample_indices = (
+                        batch["index"].detach().cpu().tolist()
+                    )
+                    for sample_index, value in zip(
+                        sample_indices, values
+                    ):
+                        index = int(sample_index)
+                        if index in observed:
+                            raise RuntimeError(
+                                f"duplicate forget sample index {index}"
+                            )
+                        observed[index] = float(value)
+        finally:
+            model.train(was_training)
+
+        if set(observed) != set(indices):
+            missing = sorted(set(indices) - set(observed))
+            raise RuntimeError(
+                f"NLL scan missed forget sample indices: {missing}"
             )
-        )
-        return self._active_sampler
+        return observed
 
-    def _append_npo_losses(
-        self,
-        sample_indices,
-        per_sample_npo,
-    ):
-        values = (
-            per_sample_npo
-            .detach()
-            .float()
-            .cpu()
-            .tolist()
-        )
+    def _initial_nll_cache_metadata(self):
+        dataset = getattr(self.forget_dataset, "data", None)
+        model_config = getattr(self.model, "config", None)
+        return {
+            "schema_version": 1,
+            "definition": "sequence_nll / valid_answer_token_count",
+            "num_forget_samples": self.num_forget_samples,
+            "dataset_fingerprint": getattr(dataset, "_fingerprint", None),
+            "dataset_max_length": getattr(
+                self.forget_dataset, "max_length", None
+            ),
+            "model_name_or_path": getattr(
+                model_config, "_name_or_path", None
+            ),
+            "tokenizer_name_or_path": getattr(
+                self.processing_class, "name_or_path", None
+            ),
+        }
 
-        for sample_idx, value in zip(
-            sample_indices,
-            values,
+    def _initial_nll_payload(self, observed):
+        return {
+            **self._initial_nll_cache_metadata(),
+            "gain_definition": (
+                "current_normalized_nll - initial_normalized_nll"
+            ),
+            "initial_sample_nll": {
+                str(index): observed[index]
+                for index in sorted(observed)
+            },
+        }
+
+    def _load_initial_nll_cache(self):
+        if not self.initial_nll_cache_path or not os.path.isfile(
+            self.initial_nll_cache_path
         ):
-            idx = int(sample_idx)
-
-            if idx in self.stopped_samples:
+            return None
+        with open(
+            self.initial_nll_cache_path, "r", encoding="utf-8"
+        ) as handle:
+            payload = json.load(handle)
+        raw_values = payload.get("initial_sample_nll")
+        if not isinstance(raw_values, dict):
+            raise RuntimeError(
+                "initial NLL cache has no initial_sample_nll mapping: "
+                f"{self.initial_nll_cache_path}"
+            )
+        observed = {
+            int(key): float(value) for key, value in raw_values.items()
+        }
+        if set(observed) != self.all_sample_indices:
+            raise RuntimeError(
+                "initial NLL cache sample indices do not match the forget set: "
+                f"{self.initial_nll_cache_path}"
+            )
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in observed.values()
+        ):
+            raise RuntimeError(
+                "initial NLL cache contains an invalid value: "
+                f"{self.initial_nll_cache_path}"
+            )
+        expected = self._initial_nll_cache_metadata()
+        for key in (
+            "definition",
+            "num_forget_samples",
+            "dataset_fingerprint",
+            "dataset_max_length",
+            "model_name_or_path",
+            "tokenizer_name_or_path",
+        ):
+            cached_value = payload.get(key)
+            expected_value = expected[key]
+            if cached_value is not None and cached_value != expected_value:
                 raise RuntimeError(
-                    f"Stopped sample {idx} unexpectedly appeared "
-                    "in the active training loader."
+                    f"initial NLL cache {key} mismatch: "
+                    f"cached={cached_value!r}, expected={expected_value!r}, "
+                    f"path={self.initial_nll_cache_path}"
+                )
+        print(
+            "[IES-NPO-NLL-Gain] initial_nll_cache=hit "
+            f"path={self.initial_nll_cache_path}",
+            flush=True,
+        )
+        return observed
+
+    def _write_initial_nll_cache(self, observed):
+        if not self.initial_nll_cache_path:
+            return
+        cache_dir = os.path.dirname(self.initial_nll_cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        temporary_path = f"{self.initial_nll_cache_path}.tmp.{os.getpid()}"
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                self._initial_nll_payload(observed),
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+        os.replace(temporary_path, self.initial_nll_cache_path)
+        print(
+            "[IES-NPO-NLL-Gain] initial_nll_cache=written "
+            f"path={self.initial_nll_cache_path}",
+            flush=True,
+        )
+
+    def _scan_initial_sample_nll(self):
+        observed = self._load_initial_nll_cache()
+        cache_hit = observed is not None
+        if observed is None:
+            print(
+                "[IES-NPO-NLL-Gain] initial_nll_cache=miss; "
+                "scanning fixed initial model",
+                flush=True,
+            )
+            observed = self._scan_sample_nll(
+                self.model, self.all_sample_indices
+            )
+            self._write_initial_nll_cache(observed)
+        self.initial_sample_nll = observed
+        for index in sorted(self.all_sample_indices):
+            self.sample_nll_history[index].append(observed[index])
+            self.nll_gain_history[index].append(0.0)
+        if self.is_world_process_zero():
+            with open(
+                self.initial_state_path, "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    {
+                        **self._initial_nll_payload(observed),
+                        "source": "cache" if cache_hit else "model_forward",
+                        "cache_path": self.initial_nll_cache_path,
+                    },
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
                 )
 
-            self.npo_loss_history[idx].append(
-                float(value)
-            )
-
-    def _finalize_epoch(self):
-        completed_epoch = int(
-            round(float(self.state.epoch or 0.0))
+    def get_train_dataloader(self):
+        self._stream = _IndependentStreams(
+            self, self._train_batch_size
         )
+        loader = DataLoader(
+            self._stream,
+            batch_size=None,
+            collate_fn=_identity,
+            num_workers=0,
+            pin_memory=bool(self.args.dataloader_pin_memory),
+        )
+        return self.accelerator.prepare(loader)
 
+    def _finalize_nll_gain_epoch(self, model=None):
+        completed_epoch = int(round(float(self.state.epoch or 0.0)))
         if completed_epoch <= self._last_finalized_epoch:
             return
 
-        # These samples were already stopped before this epoch and therefore
-        # were completely absent from the epoch's training loader.
-        stopped_before_epoch = set(
-            self.stopped_samples
-        )
-        saved_this_epoch = len(
-            stopped_before_epoch
-        )
-        self._saved_sample_computations += (
-            saved_this_epoch
-        )
+        active_before = sorted(self.active_samples)
+        stopped_before = set(self.stopped_samples)
 
+        # Scan every forget sample at one fixed epoch-end snapshot. Stopped
+        # samples are forward-only: they never re-enter forget loss here.
+        observed = self._scan_sample_nll(
+            model, self.all_sample_indices
+        )
         newly_stopped = []
         sample_records = {}
 
-        # Only active samples have a new observation this epoch.
-        for idx in sorted(self.active_samples):
-            history = self.npo_loss_history[idx]
+        for index in active_before:
+            current_nll = observed[index]
+            initial_nll = self.initial_sample_nll[index]
+            previous_nll = self.sample_nll_history[index][-1]
+            gain = float(current_nll - initial_nll)
+            nll_change = float(current_nll - previous_nll)
+            self.sample_nll_history[index].append(current_nll)
+            self.nll_gain_history[index].append(gain)
 
-            second_difference = None
-            score = None
-            stable_condition = False
+            eligible = completed_epoch > self.warm_up
+            threshold_hit = eligible and gain >= self.gain_threshold
+            if threshold_hit:
+                self.gain_streak[index] += 1
+            else:
+                self.gain_streak[index] = 0
 
-            if len(history) >= 3:
-                second_difference = float(
-                    history[-1]
-                    - 2.0 * history[-2]
-                    + history[-3]
-                )
-                score = abs(second_difference)
+            if (
+                eligible
+                and self.gain_streak[index] >= self.patience
+            ):
+                newly_stopped.append(index)
+                self.stop_epoch[index] = completed_epoch
+                self.stop_nll[index] = current_nll
+                self.stop_gain[index] = gain
 
-                self.second_difference_history[idx].append(
-                    second_difference
-                )
-
-                stable_condition = (
-                    score <= self.stop_threshold
-                )
-
-                if stable_condition:
-                    self.stable_streak[idx] += 1
-                else:
-                    self.stable_streak[idx] = 0
-
-                if (
-                    self.stable_streak[idx]
-                    >= self.stable_checks
-                ):
-                    newly_stopped.append(idx)
-                    self.stop_epoch[idx] = completed_epoch
-                    self.stop_score[idx] = score
-
-            sample_records[str(idx)] = {
-                "npo_loss": (
-                    float(history[-1])
-                    if history
-                    else None
+            sample_records[str(index)] = {
+                "observed_this_epoch": True,
+                "length_normalized_sample_nll": current_nll,
+                "initial_sample_nll": initial_nll,
+                "nll_gain": gain,
+                "nll_change_since_previous_epoch": nll_change,
+                "nll_change_since_stop": (
+                    0.0 if index in newly_stopped else None
                 ),
-                "npo_loss_window": [
-                    float(value)
-                    for value in history[-3:]
-                ],
-                "second_difference": second_difference,
-                "score": score,
-                "stable_condition": stable_condition,
-                "stable_streak": self.stable_streak[idx],
-                "stopped_now": idx in newly_stopped,
+                "monitoring_mode": "forget_training",
+                "eligible_after_warm_up": eligible,
+                "threshold_hit": threshold_hit,
+                "consecutive_hit_count": self.gain_streak[index],
+                "stopped_now": index in newly_stopped,
+                "state_after": (
+                    "stopped"
+                    if index in newly_stopped
+                    else "active"
+                ),
             }
 
-        self.stopped_samples.update(
-            newly_stopped
-        )
-        self.active_samples = (
-            self.all_sample_indices
-            - self.stopped_samples
-        )
+        self.stopped_samples.update(newly_stopped)
+        self.active_samples.difference_update(newly_stopped)
 
-        if self._active_sampler is not None:
-            self._active_sampler.update(
-                sorted(self.active_samples)
+        for index in sorted(stopped_before):
+            current_nll = observed[index]
+            initial_nll = self.initial_sample_nll[index]
+            previous_nll = self.sample_nll_history[index][-1]
+            gain = float(current_nll - initial_nll)
+            nll_change = float(current_nll - previous_nll)
+            nll_change_since_stop = float(
+                current_nll - self.stop_nll[index]
             )
-            self._active_sampler.set_epoch(
-                completed_epoch
-            )
+            self.sample_nll_history[index].append(current_nll)
+            self.nll_gain_history[index].append(gain)
 
-        self._last_finalized_epoch = (
-            completed_epoch
-        )
+            sample_records[str(index)] = {
+                "observed_this_epoch": True,
+                "monitoring_mode": "stopped_forward_only",
+                "length_normalized_sample_nll": current_nll,
+                "initial_sample_nll": initial_nll,
+                "nll_gain": gain,
+                "nll_change_since_previous_epoch": nll_change,
+                "stop_nll": self.stop_nll[index],
+                "stop_gain": self.stop_gain[index],
+                "nll_change_since_stop": nll_change_since_stop,
+                "epochs_since_stop": (
+                    completed_epoch - self.stop_epoch[index]
+                ),
+                "eligible_after_warm_up": True,
+                "threshold_hit": gain >= self.gain_threshold,
+                "decision_applied": False,
+                "consecutive_hit_count": self.gain_streak[index],
+                "stopped_now": False,
+                "state_after": "stopped",
+                "stop_epoch": self.stop_epoch[index],
+            }
+
+        self._saved_forget_instances += len(stopped_before)
+        self._last_finalized_epoch = completed_epoch
+        if self._stream is not None:
+            self._stream.set_epoch(completed_epoch)
 
         epoch_record = {
             "epoch": completed_epoch,
-            "monitoring_signal": "per_sample_npo_loss",
-            "second_difference": (
-                "m_t - 2*m_t_minus_1 + m_t_minus_2"
+            "monitoring_signal": (
+                "per_sample_length_normalized_nll_gain"
             ),
-            "stop_threshold": self.stop_threshold,
-            "stable_checks": self.stable_checks,
-            "reactivation_enabled": False,
-            "stopped_sample_monitoring": False,
+            "gain_definition": (
+                "current_normalized_nll - initial_normalized_nll"
+            ),
+            "warm_up": self.warm_up,
+            "gain_threshold": self.gain_threshold,
+            "comparison": "nll_gain >= gain_threshold",
+            "patience": self.patience,
+            "irreversible": True,
             "active": len(self.active_samples),
             "stopped": len(self.stopped_samples),
             "newly_stopped": newly_stopped,
-            "saved_sample_computations_this_epoch": (
-                saved_this_epoch
+            "stopped_forward_only_instances": len(stopped_before),
+            "stopped_forward_only_no_rebound": True,
+            "saved_forget_instances_this_epoch": len(stopped_before),
+            "cumulative_saved_forget_instances": (
+                self._saved_forget_instances
             ),
-            "cumulative_saved_sample_computations": (
-                self._saved_sample_computations
+            "retain_steps_this_epoch": (
+                math.ceil(
+                    self.num_forget_samples
+                    / int(self.args.per_device_train_batch_size)
+                )
             ),
-            "samples_observed_this_epoch": sample_records,
+            "samples": sample_records,
         }
 
         if self.is_world_process_zero():
             with open(
-                self.history_path,
-                "a",
-                encoding="utf-8",
+                self.history_path, "a", encoding="utf-8"
             ) as handle:
                 handle.write(
                     json.dumps(
-                        epoch_record,
-                        ensure_ascii=False,
+                        epoch_record, ensure_ascii=False
                     )
                     + "\n"
                 )
-
-            state_record = {
-                **epoch_record,
-                "active_indices": sorted(
-                    self.active_samples
-                ),
-                "stopped_indices": sorted(
-                    self.stopped_samples
-                ),
-                "stop_epoch": {
-                    str(idx): epoch
-                    for idx, epoch
-                    in self.stop_epoch.items()
-                },
-                "stop_score": {
-                    str(idx): score
-                    for idx, score
-                    in self.stop_score.items()
-                },
-                "npo_loss_history": {
-                    str(idx): [
-                        float(value)
-                        for value in history
-                    ]
-                    for idx, history
-                    in self.npo_loss_history.items()
-                },
-                "second_difference_history": {
-                    str(idx): [
-                        float(value)
-                        for value in history
-                    ]
-                    for idx, history
-                    in self.second_difference_history.items()
-                },
-            }
-
             with open(
-                self.state_path,
-                "w",
-                encoding="utf-8",
+                self.state_path, "w", encoding="utf-8"
             ) as handle:
                 json.dump(
-                    state_record,
+                    {
+                        **epoch_record,
+                        "active_indices": sorted(self.active_samples),
+                        "stopped_indices": sorted(self.stopped_samples),
+                        "initial_sample_nll": {
+                            str(index): value
+                            for index, value
+                            in self.initial_sample_nll.items()
+                        },
+                        "sample_nll_history": {
+                            str(index): values
+                            for index, values
+                            in self.sample_nll_history.items()
+                        },
+                        "nll_gain_history": {
+                            str(index): values
+                            for index, values
+                            in self.nll_gain_history.items()
+                        },
+                        "gain_streak": {
+                            str(index): value
+                            for index, value in self.gain_streak.items()
+                        },
+                        "stop_epoch": {
+                            str(index): value
+                            for index, value in self.stop_epoch.items()
+                        },
+                        "stop_nll": {
+                            str(index): value
+                            for index, value in self.stop_nll.items()
+                        },
+                        "stop_gain": {
+                            str(index): value
+                            for index, value in self.stop_gain.items()
+                        },
+                    },
                     handle,
                     ensure_ascii=False,
                     indent=2,
@@ -416,32 +613,22 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
 
         self.log(
             {
-                "ies_npo_active": len(
-                    self.active_samples
-                ),
-                "ies_npo_stopped": len(
-                    self.stopped_samples
-                ),
-                "ies_npo_newly_stopped": len(
-                    newly_stopped
-                ),
-                "ies_npo_saved_this_epoch": (
-                    saved_this_epoch
-                ),
-                "ies_npo_saved_total": (
-                    self._saved_sample_computations
+                "ies_nll_gain_active": len(self.active_samples),
+                "ies_nll_gain_stopped": len(self.stopped_samples),
+                "ies_nll_gain_newly_stopped": len(newly_stopped),
+                "ies_nll_gain_saved_forget_total": (
+                    self._saved_forget_instances
                 ),
             }
         )
-
         print(
-            f"[IES-NPO-Irreversible] "
-            f"epoch={completed_epoch} "
+            f"[IES-NPO-NLL-Gain] epoch={completed_epoch} "
             f"active={len(self.active_samples)} "
             f"stopped={len(self.stopped_samples)} "
             f"new={len(newly_stopped)} "
-            f"saved_this_epoch={saved_this_epoch} "
-            f"saved_total={self._saved_sample_computations}"
+            f"stopped_forward={len(stopped_before)} "
+            "retain_steps=fixed",
+            flush=True,
         )
 
     def compute_loss(
@@ -451,91 +638,60 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         return_outputs=False,
         num_items_in_batch=None,
     ):
-        forget_batch = inputs["forget"]
-        retain_batch = inputs["retain"]
-
-        if "index" not in forget_batch:
-            raise RuntimeError(
-                "forget batch has no 'index'"
-            )
-
-        sample_indices = (
-            forget_batch["index"]
-            .detach()
-            .cpu()
-            .tolist()
-        )
-
-        forget_inputs = self._model_inputs(
-            forget_batch
-        )
-
-        current_nll, forget_outputs = (
-            compute_batch_nll(
-                model,
-                forget_inputs,
-            )
-        )
-
-        with torch.no_grad():
-            reference_nll, _ = (
-                compute_batch_nll(
-                    self.ref_model,
-                    forget_inputs,
-                )
-            )
-
-        # This is the unreduced loss actually averaged into the NPO
-        # forget objective:
-        #
-        # m_i^(t) = l_NPO,i^(t)
-        per_sample_npo = (
-            -2.0
-            / self.beta
-            * F.logsigmoid(
-                self.beta
-                * (
-                    current_nll
-                    - reference_nll
-                )
-            )
-        )
-
-        self._append_npo_losses(
-            sample_indices,
-            per_sample_npo,
-        )
-
-        forget_loss = per_sample_npo.mean()
-
-        retain_inputs = self._model_inputs(
-            retain_batch
-        )
+        retain_inputs = self._gain_model_inputs(inputs["retain"])
         retain_loss = self.compute_retain_loss(
-            model=model,
-            retain_inputs=retain_inputs,
+            model=model, retain_inputs=retain_inputs
         )
 
-        loss = (
-            self.gamma * forget_loss
-            + self.alpha * retain_loss
-        )
+        forget_batch = inputs.get("forget")
+        forget_outputs = None
+        active_count = 0
+        forget_loss = None
 
-        self.log(
-            {
-                "forget_loss": float(
-                    forget_loss.detach()
-                ),
-                "retain_loss": float(
-                    retain_loss.detach()
-                ),
-                "ies_npo_active_batch": len(
-                    sample_indices
-                ),
-            }
-        )
+        if forget_batch is not None:
+            sample_indices = (
+                forget_batch["index"].detach().cpu().tolist()
+            )
+            active_positions = [
+                position
+                for position, index in enumerate(sample_indices)
+                if int(index) in self.active_samples
+            ]
+            if active_positions:
+                positions = torch.tensor(
+                    active_positions, dtype=torch.long
+                )
+                forget_batch = self._gain_slice_batch(
+                    forget_batch, positions
+                )
+                forget_inputs = self._gain_model_inputs(forget_batch)
+                current_nll, forget_outputs = compute_batch_nll(
+                    model, forget_inputs
+                )
+                with torch.no_grad():
+                    reference_nll, _ = compute_batch_nll(
+                        self.ref_model, forget_inputs
+                    )
+                per_sample_npo = (
+                    -2.0
+                    / self.beta
+                    * F.logsigmoid(
+                        self.beta * (current_nll - reference_nll)
+                    )
+                )
+                forget_loss = per_sample_npo.mean()
+                active_count = len(active_positions)
+
+        loss = self.alpha * retain_loss
+        log_values = {
+            "retain_loss": float(retain_loss.detach()),
+            "ies_nll_gain_active_batch": active_count,
+        }
+        if forget_loss is not None:
+            loss = loss + self.gamma * forget_loss
+            log_values["forget_loss"] = float(forget_loss.detach())
+        self.log(log_values)
 
         if return_outputs:
             return loss, forget_outputs
-
         return loss

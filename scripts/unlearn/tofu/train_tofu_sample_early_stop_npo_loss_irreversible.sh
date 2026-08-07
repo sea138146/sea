@@ -3,7 +3,8 @@ set -euo pipefail
 
 export CUDA_VISIBLE_DEVICES=0
 
-MODEL="Llama-3.2-1B-Instruct"
+MODEL_CONFIG="Llama-2-7b-chat-hf"
+MODEL_TAG="Llama-2-7b-chat-hf"
 TRAINER="SampleEarlyStopNPOLossIrreversible"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,25 +13,32 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 splits=(
-#    "forget01 holdout01 retain99"
+ #   "forget01 holdout01 retain99"
     "forget05 holdout05 retain95"
-#    "forget10 holdout10 retain90"
+    # "forget10 holdout10 retain90"
 )
 
-PRETRAINED_PATH="/model/finetune_models/tofu_Llama-3.2-1B-Instruct_full"
+PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
 
 CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
 EVAL_ROOT="/model/evals"
+INITIAL_NLL_CACHE_ROOT="${CHECKPOINT_ROOT}/tofu/initial_nll/${MODEL_TAG}"
 
-threshold_set=(
-    "1e-5"
-    "3e-5"
-    "1e-4"
+warm_up_set=(
+    "2"
 )
 
-for threshold in "${threshold_set[@]}"; do
+patience_set=(
+    "1"
+)
+
+gain_threshold_set=(
+    "1.8" "2.0" "2.2"
+)
+
 lr_set=(
     "2e-5"
+    "5e-5"
 )
 
 bz_set=(
@@ -43,16 +51,22 @@ epoch_set=(
 
 mkdir -p "${CHECKPOINT_ROOT}"
 mkdir -p "${EVAL_ROOT}"
+mkdir -p "${INITIAL_NLL_CACHE_ROOT}"
 
 if [[ ! -e "${PRETRAINED_PATH}" ]]; then
     echo "错误：未找到预训练模型：${PRETRAINED_PATH}"
     exit 1
 fi
 
+for warm_up in "${warm_up_set[@]}"; do
+for patience in "${patience_set[@]}"; do
+for gain_threshold in "${gain_threshold_set[@]}"; do
+
 for split in "${splits[@]}"; do
     read -r forget_split holdout_split retain_split <<< "${split}"
+    initial_nll_cache_file="${INITIAL_NLL_CACHE_ROOT}/${forget_split}.json"
 
-    retain_eval_file="${EVAL_ROOT}/tofu_${MODEL}_${retain_split}/TOFU_EVAL.json"
+    retain_eval_file="${EVAL_ROOT}/tofu_${MODEL_TAG}_${retain_split}/TOFU_EVAL.json"
 
     if [[ ! -f "${retain_eval_file}" ]]; then
         echo "错误：未找到 retain 评估文件：${retain_eval_file}"
@@ -64,18 +78,16 @@ for split in "${splits[@]}"; do
             read -r bsz grad_acc <<< "${bz}"
 
             for epochs in "${epoch_set[@]}"; do
-                SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_npoloss_irreversible_tau${threshold}_stable2"
-
-                TASK_NAME="unlearn_tofu_${MODEL}_${forget_split}_${TRAINER}_${SUFFIX}"
-
-                OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL}/${TRAINER}/${SUFFIX}"
-
+                SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}"
+                TASK_NAME="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${SUFFIX}"
+                OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${SUFFIX}"
                 mkdir -p "${OUTPUT_DIR}"
 
                 echo
                 echo "============================================================"
                 echo "开始训练：${TASK_NAME}"
-                echo "model=${MODEL}"
+                echo "model_config=${MODEL_CONFIG}"
+                echo "model_tag=${MODEL_TAG}"
                 echo "pretrained_path=${PRETRAINED_PATH}"
                 echo "forget_split=${forget_split}"
                 echo "retain_split=${retain_split}"
@@ -84,15 +96,21 @@ for split in "${splits[@]}"; do
                 echo "gradient_accumulation_steps=${grad_acc}"
                 echo "effective_batch_size=$((bsz * grad_acc))"
                 echo "epochs=${epochs}"
-                echo "threshold=${threshold}"
+                echo "warm_up=${warm_up}"
+                echo "gain_threshold=${gain_threshold}"
+                echo "patience=${patience}"
                 echo "output_dir=${OUTPUT_DIR}"
+                echo "initial_nll_cache=${initial_nll_cache_file}"
                 echo "============================================================"
+                echo "stopping_rule=normalized_nll_gain_ge_${gain_threshold}_for_${patience}_consecutive_epochs_after_warmup_${warm_up}"
+                echo "data_streams=independent_forget_and_retain"
+                echo "stopped_samples=forward_only_nll_monitoring_no_rebound"
 
                 python src/train.py --config-name=unlearn.yaml \
                     experiment=unlearn/tofu/default \
                     trainer="${TRAINER}" \
                     collator=DataCollatorForSupervisedDatasetwithIndex \
-                    model="${MODEL}" \
+                    model="${MODEL_CONFIG}" \
                     model.model_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
                     model.tokenizer_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
                     forget_split="${forget_split}" \
@@ -110,12 +128,14 @@ for split in "${splits[@]}"; do
                     trainer.args.learning_rate="${lr}" \
                     trainer.args.per_device_train_batch_size="${bsz}" \
                     trainer.args.gradient_accumulation_steps="${grad_acc}" \
-                    trainer.args.num_train_epochs="${epochs}" \
                     trainer.args.dataloader_drop_last=false \
+                    trainer.args.num_train_epochs="${epochs}" \
                     trainer.args.eval_strategy=no \
                     trainer.args.eval_on_start=false \
-                    trainer.method_args.stop_threshold="${threshold}" \
-                    trainer.method_args.stable_checks=2 \
+                    trainer.method_args.warm_up="${warm_up}" \
+                    trainer.method_args.gain_threshold="${gain_threshold}" \
+                    trainer.method_args.patience="${patience}" \
+                    trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}"
                 # ============================================================
                 # Evaluate the final locally saved model after training.
                 # ============================================================
@@ -144,7 +164,7 @@ for split in "${splits[@]}"; do
 
                 python -u src/eval.py --config-name=eval.yaml \
                     experiment=eval/tofu/default \
-                    model="${MODEL}" \
+                    model="${MODEL_CONFIG}" \
                     model.model_args.pretrained_model_name_or_path="${OUTPUT_DIR}" \
                     model.tokenizer_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
                     forget_split="${forget_split}" \
@@ -167,5 +187,6 @@ for split in "${splits[@]}"; do
         done
     done
 done
-
+done
+done
 done

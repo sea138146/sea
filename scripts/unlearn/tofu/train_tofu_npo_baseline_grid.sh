@@ -2,7 +2,7 @@
 set -euo pipefail
 
 source /opt/conda/etc/profile.d/conda.sh
-conda activate unlearning
+conda activate openunlearning
 
 export CUDA_VISIBLE_DEVICES=0
 export HF_HUB_OFFLINE=1
@@ -12,21 +12,21 @@ export WANDB_DISABLED=true
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 
-MODEL="Llama-3.2-1B-Instruct"
+MODEL="Llama-2-7b-chat-hf"
 TRAINER="NPO"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-PRETRAINED_PATH="/model/finetune_models/tofu_Llama-3.2-1B-Instruct_full"
+PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
 CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
 EVAL_ROOT="/model/evals"
 
 splits=(
 #    "forget01 holdout01 retain99"
-    "forget05 holdout05 retain95"
-#    "forget10 holdout10 retain90"
+#    "forget05 holdout05 retain95"
+    "forget10 holdout10 retain90"
 )
 
 lr_set=(
@@ -124,7 +124,8 @@ for split in "${splits[@]}"; do
                     trainer.method_args.beta=0.1 \
                     trainer.method_args.alpha=1.0 \
                     trainer.method_args.gamma=1.0 \
-                    trainer.method_args.retain_loss_type=NLL
+                    trainer.method_args.retain_loss_type=NLL \
+                    trainer.method_args.log_per_sample_normalized_nll=true
 
                 test -f "${OUTPUT_DIR}/config.json" || {
                     echo "训练完成后未找到模型：${OUTPUT_DIR}/config.json"
@@ -177,7 +178,7 @@ for forget_split in ("forget01", "forget05", "forget10"):
     root = (
         base
         / forget_split
-        / "Llama-3.2-1B-Instruct"
+        / "Llama-2-7b-chat-hf"
         / "NPO"
     )
 
