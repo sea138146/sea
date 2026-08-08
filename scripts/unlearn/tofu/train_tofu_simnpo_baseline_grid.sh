@@ -32,7 +32,7 @@ splits=(
     "forget10 holdout10 retain90"
 )
 
-lr_set=("1e-5" "2e-5")
+lr_set=("1e-5" "2e-5" "5e-5")
 bz_set=("4 2")
 beta_set=("3.5")
 delta_set=("1")

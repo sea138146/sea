@@ -16,14 +16,19 @@ method_args:
   # Epochs 1-2 only record NLL gain. Decisions start at epoch 3.
   warm_up: 2
 
-  # Permanently stop after patience consecutive post-warm-up epochs where the
-  # per-sample length-normalized NLL gain is greater than or equal to 2.0.
+  # Stop active samples at or above gain_threshold.
   gain_threshold: 2.0
   patience: 2
+
+  # Reactivate stopped samples at or below
+  # gain_threshold - rebound_delta for reactivation_patience snapshots.
+  rebound_delta: 0.2
+  # null makes reactivation patience equal to stop patience.
+  reactivation_patience: null
 
   # Optional split/model-specific cache. When present it is validated and
   # loaded; when absent it is generated atomically from the fixed model.
   initial_nll_cache_path: null
 
-  # Stopped samples remain excluded from forget loss but receive one
-  # forward-only normalized-NLL snapshot at every epoch end. No reactivation.
+  # Stopped samples remain excluded from forget loss, receive a forward-only
+  # snapshot every epoch, and return to forget updates after reactivation.

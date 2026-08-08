@@ -77,13 +77,15 @@ def _identity(value):
 
 
 class SampleEarlyStopNPOLossIrreversible(NPO):
-    """Irreversible per-sample stopping based on normalized-NLL gain.
+    """Reversible per-sample stopping based on normalized-NLL gain.
 
     Epochs up to and including warm_up only record trajectories. After
-    warm-up, a sample is permanently removed from forget updates when its
-    length-normalized NLL gain is greater than or equal to gain_threshold for
-    patience consecutive epoch-end snapshots. Retain updates
-    continue for every original training step.
+    warm-up, an active sample leaves forget updates when its length-normalized
+    NLL gain is at least gain_threshold for patience consecutive epoch-end
+    snapshots. A stopped sample is monitored forward-only and re-enters forget
+    updates after its gain is at most gain_threshold - rebound_delta for
+    reactivation_patience consecutive snapshots. Retain updates continue for
+    every original training step.
     """
 
     class _NLLGainEpochEndCallback(TrainerCallback):
@@ -99,6 +101,8 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         warm_up=2,
         gain_threshold=2.0,
         patience=2,
+        rebound_delta=0.2,
+        reactivation_patience=None,
         initial_nll_cache_path=None,
         *args,
         **kwargs,
@@ -107,6 +111,15 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         self.warm_up = int(warm_up)
         self.gain_threshold = float(gain_threshold)
         self.patience = int(patience)
+        self.rebound_delta = float(rebound_delta)
+        self.reactivation_patience = (
+            self.patience
+            if reactivation_patience is None
+            else int(reactivation_patience)
+        )
+        self.rebound_threshold = (
+            self.gain_threshold - self.rebound_delta
+        )
         self.initial_nll_cache_path = (
             os.path.abspath(os.path.expanduser(initial_nll_cache_path))
             if initial_nll_cache_path
@@ -118,6 +131,12 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             raise ValueError("gain_threshold must be non-negative")
         if self.patience < 1:
             raise ValueError("patience must be >= 1")
+        if not 0.0 <= self.rebound_delta <= self.gain_threshold:
+            raise ValueError(
+                "rebound_delta must be between 0 and gain_threshold"
+            )
+        if self.reactivation_patience < 1:
+            raise ValueError("reactivation_patience must be >= 1")
         if self.accelerator.num_processes != 1:
             raise RuntimeError(
                 "SampleEarlyStopNPOLossIrreversible currently supports one process"
@@ -154,6 +173,12 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         self.gain_streak = {
             index: 0 for index in self.all_sample_indices
         }
+        self.reactivation_streak = {
+            index: 0 for index in self.all_sample_indices
+        }
+        self.transition_history = {
+            index: [] for index in self.all_sample_indices
+        }
         self.stop_epoch = {}
         self.stop_nll = {}
         self.stop_gain = {}
@@ -184,7 +209,10 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             f"warm_up={self.warm_up} "
             f"gain_threshold={self.gain_threshold} "
             f"patience={self.patience} "
-            "rebound=false retain_stream=fixed",
+            f"rebound_delta={self.rebound_delta} "
+            f"rebound_threshold={self.rebound_threshold} "
+            f"reactivation_patience={self.reactivation_patience} "
+            "rebound=true retain_stream=fixed",
             flush=True,
         )
 
@@ -429,12 +457,14 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         active_before = sorted(self.active_samples)
         stopped_before = set(self.stopped_samples)
 
-        # Scan every forget sample at one fixed epoch-end snapshot. Stopped
-        # samples are forward-only: they never re-enter forget loss here.
+        # Every sample receives one fixed epoch-end snapshot. Stopped samples
+        # are forward-only in this epoch; a reactivated sample returns to the
+        # forget stream from the next epoch.
         observed = self._scan_sample_nll(
             model, self.all_sample_indices
         )
         newly_stopped = []
+        reactivated = []
         sample_records = {}
 
         for index in active_before:
@@ -445,6 +475,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             nll_change = float(current_nll - previous_nll)
             self.sample_nll_history[index].append(current_nll)
             self.nll_gain_history[index].append(gain)
+            self.reactivation_streak[index] = 0
 
             eligible = completed_epoch > self.warm_up
             threshold_hit = eligible and gain >= self.gain_threshold
@@ -453,14 +484,24 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             else:
                 self.gain_streak[index] = 0
 
-            if (
+            stopped_now = (
                 eligible
                 and self.gain_streak[index] >= self.patience
-            ):
+            )
+            if stopped_now:
                 newly_stopped.append(index)
                 self.stop_epoch[index] = completed_epoch
                 self.stop_nll[index] = current_nll
                 self.stop_gain[index] = gain
+                self.reactivation_streak[index] = 0
+                self.transition_history[index].append(
+                    {
+                        "type": "stop",
+                        "epoch": completed_epoch,
+                        "length_normalized_sample_nll": current_nll,
+                        "nll_gain": gain,
+                    }
+                )
 
             sample_records[str(index)] = {
                 "observed_this_epoch": True,
@@ -469,18 +510,17 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                 "nll_gain": gain,
                 "nll_change_since_previous_epoch": nll_change,
                 "nll_change_since_stop": (
-                    0.0 if index in newly_stopped else None
+                    0.0 if stopped_now else None
                 ),
                 "monitoring_mode": "forget_training",
                 "eligible_after_warm_up": eligible,
-                "threshold_hit": threshold_hit,
-                "consecutive_hit_count": self.gain_streak[index],
-                "stopped_now": index in newly_stopped,
-                "state_after": (
-                    "stopped"
-                    if index in newly_stopped
-                    else "active"
-                ),
+                "stop_threshold_hit": threshold_hit,
+                "stop_consecutive_hit_count": self.gain_streak[index],
+                "stopped_now": stopped_now,
+                "reactivation_threshold_hit": False,
+                "reactivation_consecutive_hit_count": 0,
+                "reactivated_now": False,
+                "state_after": "stopped" if stopped_now else "active",
             }
 
         self.stopped_samples.update(newly_stopped)
@@ -492,11 +532,35 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             previous_nll = self.sample_nll_history[index][-1]
             gain = float(current_nll - initial_nll)
             nll_change = float(current_nll - previous_nll)
+            current_stop_epoch = self.stop_epoch[index]
+            current_stop_nll = self.stop_nll[index]
+            current_stop_gain = self.stop_gain[index]
             nll_change_since_stop = float(
-                current_nll - self.stop_nll[index]
+                current_nll - current_stop_nll
             )
             self.sample_nll_history[index].append(current_nll)
             self.nll_gain_history[index].append(gain)
+
+            reactivation_hit = gain <= self.rebound_threshold
+            if reactivation_hit:
+                self.reactivation_streak[index] += 1
+            else:
+                self.reactivation_streak[index] = 0
+            reactivated_now = (
+                self.reactivation_streak[index]
+                >= self.reactivation_patience
+            )
+            if reactivated_now:
+                reactivated.append(index)
+                self.transition_history[index].append(
+                    {
+                        "type": "reactivate",
+                        "epoch": completed_epoch,
+                        "length_normalized_sample_nll": current_nll,
+                        "nll_gain": gain,
+                        "rebound_threshold": self.rebound_threshold,
+                    }
+                )
 
             sample_records[str(index)] = {
                 "observed_this_epoch": True,
@@ -505,20 +569,36 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                 "initial_sample_nll": initial_nll,
                 "nll_gain": gain,
                 "nll_change_since_previous_epoch": nll_change,
-                "stop_nll": self.stop_nll[index],
-                "stop_gain": self.stop_gain[index],
+                "stop_nll": current_stop_nll,
+                "stop_gain": current_stop_gain,
                 "nll_change_since_stop": nll_change_since_stop,
                 "epochs_since_stop": (
-                    completed_epoch - self.stop_epoch[index]
+                    completed_epoch - current_stop_epoch
                 ),
                 "eligible_after_warm_up": True,
-                "threshold_hit": gain >= self.gain_threshold,
-                "decision_applied": False,
-                "consecutive_hit_count": self.gain_streak[index],
+                "stop_threshold_hit": gain >= self.gain_threshold,
+                "stop_consecutive_hit_count": self.gain_streak[index],
                 "stopped_now": False,
-                "state_after": "stopped",
-                "stop_epoch": self.stop_epoch[index],
+                "reactivation_threshold": self.rebound_threshold,
+                "reactivation_threshold_hit": reactivation_hit,
+                "reactivation_consecutive_hit_count": (
+                    self.reactivation_streak[index]
+                ),
+                "reactivated_now": reactivated_now,
+                "state_after": (
+                    "active" if reactivated_now else "stopped"
+                ),
+                "stop_epoch": current_stop_epoch,
             }
+
+        for index in reactivated:
+            self.stopped_samples.discard(index)
+            self.active_samples.add(index)
+            self.gain_streak[index] = 0
+            self.reactivation_streak[index] = 0
+            self.stop_epoch.pop(index, None)
+            self.stop_nll.pop(index, None)
+            self.stop_gain.pop(index, None)
 
         self._saved_forget_instances += len(stopped_before)
         self._last_finalized_epoch = completed_epoch
@@ -535,14 +615,20 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             ),
             "warm_up": self.warm_up,
             "gain_threshold": self.gain_threshold,
-            "comparison": "nll_gain >= gain_threshold",
+            "stop_comparison": "nll_gain >= gain_threshold",
             "patience": self.patience,
-            "irreversible": True,
+            "rebound_delta": self.rebound_delta,
+            "rebound_threshold": self.rebound_threshold,
+            "reactivation_comparison": (
+                "nll_gain <= gain_threshold - rebound_delta"
+            ),
+            "reactivation_patience": self.reactivation_patience,
+            "rebound_enabled": True,
             "active": len(self.active_samples),
             "stopped": len(self.stopped_samples),
             "newly_stopped": newly_stopped,
+            "reactivated": reactivated,
             "stopped_forward_only_instances": len(stopped_before),
-            "stopped_forward_only_no_rebound": True,
             "saved_forget_instances_this_epoch": len(stopped_before),
             "cumulative_saved_forget_instances": (
                 self._saved_forget_instances
@@ -561,10 +647,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                 self.history_path, "a", encoding="utf-8"
             ) as handle:
                 handle.write(
-                    json.dumps(
-                        epoch_record, ensure_ascii=False
-                    )
-                    + "\n"
+                    json.dumps(epoch_record, ensure_ascii=False) + "\n"
                 )
             with open(
                 self.state_path, "w", encoding="utf-8"
@@ -593,6 +676,16 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                             str(index): value
                             for index, value in self.gain_streak.items()
                         },
+                        "reactivation_streak": {
+                            str(index): value
+                            for index, value
+                            in self.reactivation_streak.items()
+                        },
+                        "transition_history": {
+                            str(index): values
+                            for index, values
+                            in self.transition_history.items()
+                        },
                         "stop_epoch": {
                             str(index): value
                             for index, value in self.stop_epoch.items()
@@ -616,6 +709,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                 "ies_nll_gain_active": len(self.active_samples),
                 "ies_nll_gain_stopped": len(self.stopped_samples),
                 "ies_nll_gain_newly_stopped": len(newly_stopped),
+                "ies_nll_gain_reactivated": len(reactivated),
                 "ies_nll_gain_saved_forget_total": (
                     self._saved_forget_instances
                 ),
@@ -626,6 +720,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             f"active={len(self.active_samples)} "
             f"stopped={len(self.stopped_samples)} "
             f"new={len(newly_stopped)} "
+            f"reactivated={len(reactivated)} "
             f"stopped_forward={len(stopped_before)} "
             "retain_steps=fixed",
             flush=True,

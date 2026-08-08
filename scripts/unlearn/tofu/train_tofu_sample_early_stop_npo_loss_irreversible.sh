@@ -14,8 +14,8 @@ cd "${PROJECT_ROOT}"
 
 splits=(
  #   "forget01 holdout01 retain99"
-    "forget05 holdout05 retain95"
-    # "forget10 holdout10 retain90"
+    # "forget05 holdout05 retain95"
+     "forget10 holdout10 retain90"
 )
 
 PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
@@ -36,7 +36,16 @@ gain_threshold_set=(
     "1.8" "2.0" "2.2"
 )
 
+rebound_delta_set=(
+    "0.2"
+)
+
+reactivation_patience_set=(
+    "2"
+)
+
 lr_set=(
+    # "1e-5"
     "2e-5"
     "5e-5"
 )
@@ -61,6 +70,8 @@ fi
 for warm_up in "${warm_up_set[@]}"; do
 for patience in "${patience_set[@]}"; do
 for gain_threshold in "${gain_threshold_set[@]}"; do
+for rebound_delta in "${rebound_delta_set[@]}"; do
+for reactivation_patience in "${reactivation_patience_set[@]}"; do
 
 for split in "${splits[@]}"; do
     read -r forget_split holdout_split retain_split <<< "${split}"
@@ -78,7 +89,7 @@ for split in "${splits[@]}"; do
             read -r bsz grad_acc <<< "${bz}"
 
             for epochs in "${epoch_set[@]}"; do
-                SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}"
+                SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}"
                 TASK_NAME="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${SUFFIX}"
                 OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${SUFFIX}"
                 mkdir -p "${OUTPUT_DIR}"
@@ -99,12 +110,16 @@ for split in "${splits[@]}"; do
                 echo "warm_up=${warm_up}"
                 echo "gain_threshold=${gain_threshold}"
                 echo "patience=${patience}"
+                echo "rebound_delta=${rebound_delta}"
+                echo "rebound_threshold=${gain_threshold}-${rebound_delta} (computed by trainer)"
+                echo "reactivation_patience=${reactivation_patience}"
                 echo "output_dir=${OUTPUT_DIR}"
                 echo "initial_nll_cache=${initial_nll_cache_file}"
                 echo "============================================================"
                 echo "stopping_rule=normalized_nll_gain_ge_${gain_threshold}_for_${patience}_consecutive_epochs_after_warmup_${warm_up}"
+                echo "reactivation_rule=normalized_nll_gain_le_stop_threshold_minus_${rebound_delta}_for_${reactivation_patience}_consecutive_epochs"
                 echo "data_streams=independent_forget_and_retain"
-                echo "stopped_samples=forward_only_nll_monitoring_no_rebound"
+                echo "stopped_samples=forward_only_nll_monitoring_with_reactivation"
 
                 python src/train.py --config-name=unlearn.yaml \
                     experiment=unlearn/tofu/default \
@@ -135,6 +150,8 @@ for split in "${splits[@]}"; do
                     trainer.method_args.warm_up="${warm_up}" \
                     trainer.method_args.gain_threshold="${gain_threshold}" \
                     trainer.method_args.patience="${patience}" \
+                    trainer.method_args.rebound_delta="${rebound_delta}" \
+                    trainer.method_args.reactivation_patience="${reactivation_patience}" \
                     trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}"
                 # ============================================================
                 # Evaluate the final locally saved model after training.
@@ -186,6 +203,8 @@ for split in "${splits[@]}"; do
             done
         done
     done
+done
+done
 done
 done
 done
