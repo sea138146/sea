@@ -108,6 +108,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self._nll_gain_log_prefix = "[IES-NPO-NLL-Gain]"
         self.warm_up = int(warm_up)
         self.gain_threshold = float(gain_threshold)
         self.patience = int(patience)
@@ -205,7 +206,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         self._scan_initial_sample_nll()
         self.add_callback(self._NLLGainEpochEndCallback(self))
         print(
-            "[IES-NPO-NLL-Gain] "
+            f"{self._nll_gain_log_prefix} "
             f"warm_up={self.warm_up} "
             f"gain_threshold={self.gain_threshold} "
             f"patience={self.patience} "
@@ -377,7 +378,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                     f"path={self.initial_nll_cache_path}"
                 )
         print(
-            "[IES-NPO-NLL-Gain] initial_nll_cache=hit "
+            f"{self._nll_gain_log_prefix} initial_nll_cache=hit "
             f"path={self.initial_nll_cache_path}",
             flush=True,
         )
@@ -399,7 +400,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             )
         os.replace(temporary_path, self.initial_nll_cache_path)
         print(
-            "[IES-NPO-NLL-Gain] initial_nll_cache=written "
+            f"{self._nll_gain_log_prefix} initial_nll_cache=written "
             f"path={self.initial_nll_cache_path}",
             flush=True,
         )
@@ -409,7 +410,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         cache_hit = observed is not None
         if observed is None:
             print(
-                "[IES-NPO-NLL-Gain] initial_nll_cache=miss; "
+                f"{self._nll_gain_log_prefix} initial_nll_cache=miss; "
                 "scanning fixed initial model",
                 flush=True,
             )
@@ -716,7 +717,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             }
         )
         print(
-            f"[IES-NPO-NLL-Gain] epoch={completed_epoch} "
+            f"{self._nll_gain_log_prefix} epoch={completed_epoch} "
             f"active={len(self.active_samples)} "
             f"stopped={len(self.stopped_samples)} "
             f"new={len(newly_stopped)} "
