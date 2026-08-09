@@ -20,23 +20,29 @@ TRAINER="SampleEarlyStopSimNPOIrreversible"
 PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
 CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
 EVAL_ROOT="/model/evals"
+INITIAL_NLL_CACHE_ROOT="${CHECKPOINT_ROOT}/tofu/initial_nll/${MODEL_TAG}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 splits=(
-    "forget01 holdout01 retain99"
+    # "forget01 holdout01 retain99"
     "forget05 holdout05 retain95"
     "forget10 holdout10 retain90"
 )
-threshold_set=("0.05" "0.1" "0.15")
-lr_set=("1e-5" "2e-5")
-bz_set=("4 2")
+gain_threshold_set=("2.5" "3.0")
+early_stop_set=(
+    "2 1 0.2 2" # warm_up patience rebound_delta reactivation_patience
+)
+lr_set=("2e-5" "5e-5")
+bz_set=("8 2" "8 4")
 beta_set=("3.5")
 delta_set=("1")
-gamma_set=("0.25")
+gamma_set=("0.125" "0.25")
 epoch_set=("10")
+
+mkdir -p "${INITIAL_NLL_CACHE_ROOT}"
 
 test -f "${PRETRAINED_PATH}/config.json" || {
     echo "Missing local model: ${PRETRAINED_PATH}"
@@ -45,6 +51,7 @@ test -f "${PRETRAINED_PATH}/config.json" || {
 
 for split in "${splits[@]}"; do
     read -r forget_split holdout_split retain_split <<< "${split}"
+    initial_nll_cache_file="${INITIAL_NLL_CACHE_ROOT}/${forget_split}.json"
     retain_logs="${EVAL_ROOT}/tofu_${MODEL_TAG}_${retain_split}/TOFU_EVAL.json"
 
     test -f "${retain_logs}" || {
@@ -52,7 +59,9 @@ for split in "${splits[@]}"; do
         exit 1
     }
 
-    for threshold in "${threshold_set[@]}"; do
+    for early_stop_config in "${early_stop_set[@]}"; do
+        read -r warm_up patience rebound_delta reactivation_patience <<< "${early_stop_config}"
+        for gain_threshold in "${gain_threshold_set[@]}"; do
         for lr in "${lr_set[@]}"; do
             for bz in "${bz_set[@]}"; do
                 read -r bsz grad_acc <<< "${bz}"
@@ -61,7 +70,7 @@ for split in "${splits[@]}"; do
                     for delta in "${delta_set[@]}"; do
                         for gamma in "${gamma_set[@]}"; do
                             for epochs in "${epoch_set[@]}"; do
-                    suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}_ies_simnpo_irreversible_d2absmean3_tau${threshold}"
+                    suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}_ies_simnpo_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}"
                     task_name="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${suffix}"
                     output_dir="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${suffix}"
                     eval_output_dir="${output_dir}/eval"
@@ -73,10 +82,14 @@ for split in "${splits[@]}"; do
 
                     echo
                     echo "============================================================"
-                    echo "SIMNPO irreversible sample early stopping"
+                    echo "SIMNPO reversible sample early stopping"
                     echo "Model:       ${MODEL_TAG}"
                     echo "Split:       ${forget_split}"
-                    echo "Threshold:   ${threshold}"
+                    echo "Gain thres:  ${gain_threshold}"
+                    echo "Warm up:     ${warm_up}"
+                    echo "Patience:    ${patience}"
+                    echo "Rebound:     ${rebound_delta}"
+                    echo "React pat:   ${reactivation_patience}"
                     echo "LR:          ${lr}"
                     echo "Batch size:  ${bsz}"
                     echo "Grad accum:  ${grad_acc}"
@@ -117,7 +130,12 @@ for split in "${splits[@]}"; do
                         trainer.args.per_device_train_batch_size="${bsz}" \
                         trainer.args.gradient_accumulation_steps="${grad_acc}" \
                         trainer.args.num_train_epochs="${epochs}" \
-                        trainer.method_args.stop_threshold="${threshold}" \
+                        trainer.method_args.warm_up="${warm_up}" \
+                        trainer.method_args.gain_threshold="${gain_threshold}" \
+                        trainer.method_args.patience="${patience}" \
+                        trainer.method_args.rebound_delta="${rebound_delta}" \
+                        trainer.method_args.reactivation_patience="${reactivation_patience}" \
+                        trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}" \
                         trainer.method_args.delta="${delta}" \
                         trainer.method_args.beta="${beta}" \
                         trainer.method_args.alpha=1.0 \
@@ -149,6 +167,7 @@ for split in "${splits[@]}"; do
                     done
                 done
             done
+        done
         done
     done
 done

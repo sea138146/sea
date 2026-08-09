@@ -5,6 +5,7 @@ handler: SampleEarlyStopSimNPOIrreversible
 
 args:
   dataloader_drop_last: false
+  dataloader_num_workers: 0
 
 method_args:
   delta: 0.0
@@ -13,6 +14,17 @@ method_args:
   gamma: 0.125
   retain_loss_type: NLL
 
-  # Same criterion as SampleEarlyStopNPOLossIrreversible:
-  # mean(abs(latest 3 normalized-NLL second differences)) <= threshold.
-  stop_threshold: 1.0e-2
+  # Epochs up to and including warm_up only record NLL gain.
+  warm_up: 2
+
+  # Stop active samples at or above gain_threshold.
+  gain_threshold: 2.0
+  patience: 1
+
+  # Reactivate stopped samples at or below
+  # gain_threshold - rebound_delta for consecutive snapshots.
+  rebound_delta: 0.2
+  reactivation_patience: 2
+
+  # Optional split/model-specific fixed-model initial NLL cache.
+  initial_nll_cache_path: null

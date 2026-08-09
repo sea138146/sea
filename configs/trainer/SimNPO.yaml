@@ -8,4 +8,6 @@ method_args:
   alpha: 1.0
   gamma: 0.125 # npo_coeff in https://github.com/OPTML-Group/Unlearn-Simple/blob/main/TOFU/config/forget.yaml
   retain_loss_type: NLL
+  log_per_sample_normalized_nll: false
+  initial_nll_cache_path: null
 

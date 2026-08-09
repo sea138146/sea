@@ -20,6 +20,7 @@ TRAINER="SimNPO"
 PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
 CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
 EVAL_ROOT="/model/evals"
+INITIAL_NLL_CACHE_ROOT="${CHECKPOINT_ROOT}/tofu/initial_nll/${MODEL_TAG}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -27,17 +28,19 @@ cd "${PROJECT_ROOT}"
 
 # 与 7B SimNPO 样本早停实验保持完全一致。
 splits=(
-    "forget01 holdout01 retain99"
+    # "forget01 holdout01 retain99"
     "forget05 holdout05 retain95"
     "forget10 holdout10 retain90"
 )
 
-lr_set=("1e-5" "2e-5" "5e-5")
-bz_set=("4 2")
+lr_set=("2e-5" "5e-5")
+bz_set=("8 2" "8 4")
 beta_set=("3.5")
 delta_set=("1")
-gamma_set=("0.25")
+gamma_set=("0.125" "0.25")
 epoch_set=("10")
+
+mkdir -p "${INITIAL_NLL_CACHE_ROOT}"
 
 test -f "${PRETRAINED_PATH}/config.json" || {
     echo "Missing local model: ${PRETRAINED_PATH}"
@@ -46,6 +49,7 @@ test -f "${PRETRAINED_PATH}/config.json" || {
 
 for split in "${splits[@]}"; do
     read -r forget_split holdout_split retain_split <<< "${split}"
+    initial_nll_cache_file="${INITIAL_NLL_CACHE_ROOT}/${forget_split}.json"
 
     retain_logs="${EVAL_ROOT}/tofu_${MODEL_TAG}_${retain_split}/TOFU_EVAL.json"
 
@@ -63,7 +67,7 @@ for split in "${splits[@]}"; do
                     for gamma in "${gamma_set[@]}"; do
                         for epochs in "${epoch_set[@]}"; do
 
-                            suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}"
+                            suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}_nlltraj"
 
                             task_name="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${suffix}"
 
@@ -91,6 +95,7 @@ for split in "${splits[@]}"; do
                             echo "Gamma:       ${gamma}"
                             echo "Epochs:      ${epochs}"
                             echo "Output:      ${output_dir}"
+                            echo "NLL cache:   ${initial_nll_cache_file}"
                             echo "============================================================"
 
                             rm -rf "${output_dir}"
@@ -99,7 +104,7 @@ for split in "${splits[@]}"; do
                             python -u src/train.py --config-name=unlearn.yaml \
                                 experiment=unlearn/tofu/default \
                                 trainer="${TRAINER}" \
-                                collator=DataCollatorForSupervisedDataset \
+                                collator=DataCollatorForSupervisedDatasetwithIndex \
                                 model="${MODEL_CONFIG}" \
                                 model.model_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
                                 +model.model_args.local_files_only=true \
@@ -127,7 +132,9 @@ for split in "${splits[@]}"; do
                                 trainer.method_args.delta="${delta}" \
                                 trainer.method_args.gamma="${gamma}" \
                                 trainer.method_args.alpha=1.0 \
-                                trainer.method_args.retain_loss_type=NLL
+                                trainer.method_args.retain_loss_type=NLL \
+                                trainer.method_args.log_per_sample_normalized_nll=true \
+                                trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}"
 
                             test -f "${output_dir}/config.json" || {
                                 echo "Training did not save config.json:"
