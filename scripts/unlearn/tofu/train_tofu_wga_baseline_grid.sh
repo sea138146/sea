@@ -14,12 +14,12 @@ export HYDRA_FULL_ERROR=1
 export TOKENIZERS_PARALLELISM=false
 
 # Keep these training settings aligned with
-# train_tofu_sample_early_stop_grad_diff_irreversible.sh.  GradDiff has no
+# train_tofu_sample_early_stop_wga_irreversible.sh.  WGA baseline has no
 # early-stopping threshold, so this baseline produces one run per LR/batch/epoch
 # grid point rather than repeating the three threshold values.
 MODEL_CONFIG="Llama-2-7b-chat-hf"
 MODEL_TAG="Llama-2-7b-chat-hf"
-TRAINER="GradDiff"
+TRAINER="WGA"
 
 PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
 CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
@@ -30,12 +30,13 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 splits=(
-    "forget01 holdout01 retain99 40"
-    # "forget05 holdout05 retain95 200"
-    # "forget10 holdout10 retain90 400"
+    # "forget01 holdout01 retain99 40"
+    "forget05 holdout05 retain95 200"
+    "forget10 holdout10 retain90 400"
 )
 lr_set=("1e-5" "2e-5" "5e-5")
-bz_set=("4 2")
+bz_set=("8 2")
+beta_set=("1.0" "5.0")
 epoch_set=("10")
 
 test -f "${PRETRAINED_PATH}/config.json" || {
@@ -55,9 +56,10 @@ for split in "${splits[@]}"; do
     for lr in "${lr_set[@]}"; do
         for bz in "${bz_set[@]}"; do
             read -r bsz grad_acc <<< "${bz}"
+            for beta in "${beta_set[@]}"; do
 
             for epochs in "${epoch_set[@]}"; do
-                suffix="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_nlltrace"
+                suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_e${epochs}_nlltrace"
                 task_name="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${suffix}"
                 output_dir="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${suffix}"
                 eval_output_dir="${output_dir}/eval"
@@ -69,12 +71,13 @@ for split in "${splits[@]}"; do
 
                 echo
                 echo "============================================================"
-                echo "GradDiff baseline training"
+                echo "WGA baseline training"
                 echo "Model:       ${MODEL_TAG}"
                 echo "Split:       ${forget_split}"
                 echo "LR:          ${lr}"
                 echo "Batch size:  ${bsz}"
                 echo "Grad accum:  ${grad_acc}"
+                echo "Beta:        ${beta}"
                 echo "Epochs:      ${epochs}"
                 echo "Output:      ${output_dir}"
                 echo "============================================================"
@@ -105,10 +108,13 @@ for split in "${splits[@]}"; do
                     trainer.args.save_strategy=no \
                     trainer.args.gradient_checkpointing=true \
                     trainer.args.ddp_find_unused_parameters=true \
+                    +trainer.args.dataloader_num_workers=0 \
                     trainer.args.learning_rate="${lr}" \
                     trainer.args.per_device_train_batch_size="${bsz}" \
                     trainer.args.gradient_accumulation_steps="${grad_acc}" \
                     trainer.args.num_train_epochs="${epochs}" \
+                    trainer.method_args.beta="${beta}" \
+                    trainer.method_args.alpha=1.0 \
                     trainer.method_args.gamma=1.0 \
                     trainer.method_args.retain_loss_type=NLL \
                     trainer.method_args.log_per_sample_normalized_nll=true
@@ -133,6 +139,7 @@ for split in "${splits[@]}"; do
                     retain_logs_path="${retain_logs}" \
                     task_name="${task_name}_final_eval" \
                     paths.output_dir="${eval_output_dir}"
+            done
             done
         done
     done

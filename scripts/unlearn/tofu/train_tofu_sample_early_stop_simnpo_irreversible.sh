@@ -70,7 +70,7 @@ for split in "${splits[@]}"; do
                     for delta in "${delta_set[@]}"; do
                         for gamma in "${gamma_set[@]}"; do
                             for epochs in "${epoch_set[@]}"; do
-                    suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}_ies_simnpo_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}"
+                    suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}_ies_simnpo_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}_samplingbaseline_masked"
                     task_name="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${suffix}"
                     output_dir="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${suffix}"
                     eval_output_dir="${output_dir}/eval"

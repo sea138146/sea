@@ -4,76 +4,11 @@ import os
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, IterableDataset
-from transformers import TrainerCallback
+from torch.utils.data import DataLoader
+from transformers import Trainer, TrainerCallback
 
 from trainer.unlearn.npo import NPO
 from trainer.utils import compute_batch_nll
-
-
-class _IndependentStreams(IterableDataset):
-    """Fixed retain epoch with a dynamically shrinking forget stream."""
-
-    def __init__(self, owner, batch_size):
-        self.owner = owner
-        self.batch_size = int(batch_size)
-        self.epoch = 0
-        self.steps = math.ceil(owner.num_forget_samples / self.batch_size)
-
-    def __len__(self):
-        return self.steps
-
-    def set_epoch(self, epoch):
-        self.epoch = int(epoch)
-
-    def __iter__(self):
-        generator = torch.Generator().manual_seed(
-            self.owner.args.seed + self.epoch
-        )
-        active = sorted(self.owner.active_samples)
-        if active:
-            order = torch.randperm(len(active), generator=generator).tolist()
-            active = [active[position] for position in order]
-        forget_batches = [
-            active[start : start + self.batch_size]
-            for start in range(0, len(active), self.batch_size)
-        ]
-        slots = torch.randperm(self.steps, generator=generator).tolist()
-        forget_by_slot = dict(zip(slots, forget_batches))
-
-        retain_ids = []
-        while len(retain_ids) < self.steps * self.batch_size:
-            retain_ids.extend(
-                torch.randperm(
-                    len(self.owner.retain_dataset), generator=generator
-                ).tolist()
-            )
-
-        for step in range(self.steps):
-            start = step * self.batch_size
-            batch = {
-                "retain": self.owner.data_collator(
-                    [
-                        self.owner.retain_dataset[index]
-                        for index in retain_ids[start : start + self.batch_size]
-                    ]
-                )
-            }
-            # The active set may change at a sub-epoch monitoring point.
-            forget_ids = [
-                index
-                for index in forget_by_slot.get(step, [])
-                if index in self.owner.active_samples
-            ]
-            if forget_ids:
-                batch["forget"] = self.owner.data_collator(
-                    [self.owner.forget_dataset[index] for index in forget_ids]
-                )
-            yield batch
-
-
-def _identity(value):
-    return value
 
 
 class SampleEarlyStopNPOLossIrreversible(NPO):
@@ -213,7 +148,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             f"rebound_delta={self.rebound_delta} "
             f"rebound_threshold={self.rebound_threshold} "
             f"reactivation_patience={self.reactivation_patience} "
-            "rebound=true retain_stream=fixed",
+            "rebound=true sampling=baseline_forget_anchor_masked",
             flush=True,
         )
 
@@ -438,17 +373,11 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                 )
 
     def get_train_dataloader(self):
-        self._stream = _IndependentStreams(
-            self, self._train_batch_size
-        )
-        loader = DataLoader(
-            self._stream,
-            batch_size=None,
-            collate_fn=_identity,
-            num_workers=0,
-            pin_memory=bool(self.args.dataloader_pin_memory),
-        )
-        return self.accelerator.prepare(loader)
+        # Match the baseline forget-anchored dataset, sampler, and random
+        # retain pairing. Stopped samples remain in the loader and are masked
+        # only in compute_loss, keeping optimizer steps unchanged.
+        self._stream = None
+        return Trainer.get_train_dataloader(self)
 
     def _finalize_nll_gain_epoch(self, model=None):
         completed_epoch = int(round(float(self.state.epoch or 0.0)))
@@ -603,9 +532,6 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
 
         self._saved_forget_instances += len(stopped_before)
         self._last_finalized_epoch = completed_epoch
-        if self._stream is not None:
-            self._stream.set_epoch(completed_epoch)
-
         epoch_record = {
             "epoch": completed_epoch,
             "monitoring_signal": (
@@ -625,6 +551,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             ),
             "reactivation_patience": self.reactivation_patience,
             "rebound_enabled": True,
+            "sampling_mode": "baseline_forget_anchor_masked",
             "active": len(self.active_samples),
             "stopped": len(self.stopped_samples),
             "newly_stopped": newly_stopped,
@@ -723,7 +650,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             f"new={len(newly_stopped)} "
             f"reactivated={len(reactivated)} "
             f"stopped_forward={len(stopped_before)} "
-            "retain_steps=fixed",
+            "sampling=baseline_forget_anchor_masked",
             flush=True,
         )
 
@@ -748,6 +675,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
             sample_indices = (
                 forget_batch["index"].detach().cpu().tolist()
             )
+            original_batch_size = len(sample_indices)
             active_positions = [
                 position
                 for position, index in enumerate(sample_indices)
@@ -775,8 +703,9 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
                         self.beta * (current_nll - reference_nll)
                     )
                 )
-                forget_loss = per_sample_npo.mean()
                 active_count = len(active_positions)
+                forget_scale = active_count / original_batch_size
+                forget_loss = per_sample_npo.mean() * forget_scale
 
         loss = self.alpha * retain_loss
         log_values = {
@@ -786,6 +715,7 @@ class SampleEarlyStopNPOLossIrreversible(NPO):
         if forget_loss is not None:
             loss = loss + self.gamma * forget_loss
             log_values["forget_loss"] = float(forget_loss.detach())
+            log_values["ies_nll_gain_forget_scale"] = forget_scale
         self.log(log_values)
 
         if return_outputs:

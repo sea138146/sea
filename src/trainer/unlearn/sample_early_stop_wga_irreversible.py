@@ -1,27 +1,31 @@
 import os
 
 import torch
-import torch.nn.functional as F
 
+from trainer.unlearn.wga import WGA
+from trainer.utils import compute_wga_loss
 from trainer.unlearn.sample_early_stop_npo_loss_irreversible import (
     SampleEarlyStopNPOLossIrreversible,
 )
-from trainer.unlearn.simnpo import SimNPO
-from trainer.utils import compute_batch_nll
 
 
-class SampleEarlyStopSimNPOIrreversible(SimNPO):
-    """SIMNPO with reversible per-sample normalized-NLL-gain stopping.
+class SampleEarlyStopWGAIrreversible(WGA):
+    """WGA with reversible per-sample normalized-NLL-gain stopping.
 
-    The controller is identical to the NPO version: active forget samples
-    leave gradient updates after reaching the gain threshold, stopped samples
-    remain under forward-only monitoring, and samples whose gain rebounds
-    below the reactivation threshold return to forget updates. Retain updates
-    continue for every original training step.
+    The stopping controller is method-independent and matches the NPO and
+    SimNPO implementations. Active forget samples leave gradient updates after
+    reaching the gain threshold. Stopped samples remain under forward-only NLL
+    monitoring and return to forget updates if their gain falls below the
+    rebound threshold. The baseline forget-anchored loader remains unchanged; stopped samples are
+    masked only in the forget objective, while retain updates continue normally.
+
+    The WGA objective itself is unchanged:
+
+        loss = gamma * weighted_gradient_ascent + alpha * retain_loss
     """
 
-    # These methods implement only the method-independent controller. The
-    # SIMNPO-specific objective remains in compute_loss below.
+    # Reuse only the method-independent monitoring and stream controller. The
+    # WGA-specific forget objective remains in compute_loss below.
     _NLLGainEpochEndCallback = (
         SampleEarlyStopNPOLossIrreversible._NLLGainEpochEndCallback
     )
@@ -59,17 +63,17 @@ class SampleEarlyStopSimNPOIrreversible(SimNPO):
 
     def __init__(
         self,
-        warm_up=2,
-        gain_threshold=2.0,
-        patience=2,
-        rebound_delta=0.2,
+        warm_up=1,
+        gain_threshold=1.0,
+        patience=1,
+        rebound_delta=0.1,
         reactivation_patience=None,
         initial_nll_cache_path=None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self._nll_gain_log_prefix = "[IES-SIMNPO-NLL-Gain]"
+        self._nll_gain_log_prefix = "[IES-WGA-NLL-Gain]"
         self.warm_up = int(warm_up)
         self.gain_threshold = float(gain_threshold)
         self.patience = int(patience)
@@ -79,9 +83,7 @@ class SampleEarlyStopSimNPOIrreversible(SimNPO):
             if reactivation_patience is None
             else int(reactivation_patience)
         )
-        self.rebound_threshold = (
-            self.gain_threshold - self.rebound_delta
-        )
+        self.rebound_threshold = self.gain_threshold - self.rebound_delta
         self.initial_nll_cache_path = (
             os.path.abspath(os.path.expanduser(initial_nll_cache_path))
             if initial_nll_cache_path
@@ -102,11 +104,11 @@ class SampleEarlyStopSimNPOIrreversible(SimNPO):
             raise ValueError("reactivation_patience must be >= 1")
         if self.accelerator.num_processes != 1:
             raise RuntimeError(
-                "SampleEarlyStopSimNPOIrreversible supports one process"
+                "SampleEarlyStopWGAIrreversible supports one process"
             )
         if int(self.args.dataloader_num_workers) != 0:
             raise RuntimeError(
-                "SampleEarlyStopSimNPOIrreversible requires "
+                "SampleEarlyStopWGAIrreversible requires "
                 "dataloader_num_workers=0"
             )
         if not hasattr(self.train_dataset, "forget") or not hasattr(
@@ -153,15 +155,15 @@ class SampleEarlyStopSimNPOIrreversible(SimNPO):
         os.makedirs(self.args.output_dir, exist_ok=True)
         self.initial_state_path = os.path.join(
             self.args.output_dir,
-            "ies_simnpo_nll_gain_initial_state.json",
+            "ies_wga_nll_gain_initial_state.json",
         )
         self.history_path = os.path.join(
             self.args.output_dir,
-            "ies_simnpo_nll_gain_history.jsonl",
+            "ies_wga_nll_gain_history.jsonl",
         )
         self.state_path = os.path.join(
             self.args.output_dir,
-            "ies_simnpo_nll_gain_state.json",
+            "ies_wga_nll_gain_state.json",
         )
         if self.is_world_process_zero():
             open(self.history_path, "w", encoding="utf-8").close()
@@ -194,59 +196,56 @@ class SampleEarlyStopSimNPOIrreversible(SimNPO):
 
         forget_batch = inputs.get("forget")
         forget_outputs = None
-        active_count = 0
         forget_loss = None
+        active_count = 0
 
         if forget_batch is not None:
-            sample_indices = (
-                forget_batch["index"].detach().cpu().tolist()
+            if "index" not in forget_batch:
+                raise RuntimeError(
+                    "forget batch has no index; use "
+                    "DataCollatorForSupervisedDatasetwithIndex"
+                )
+            sample_indices = forget_batch["index"].detach().cpu().tolist()
+            original_valid_tokens = int(
+                forget_batch["labels"][..., 1:].ne(-100).sum().item()
             )
-            original_batch_size = len(sample_indices)
             active_positions = [
                 position
                 for position, index in enumerate(sample_indices)
                 if int(index) in self.active_samples
             ]
             if active_positions:
-                positions = torch.tensor(
-                    active_positions, dtype=torch.long
-                )
+                positions = torch.tensor(active_positions, dtype=torch.long)
                 forget_batch = self._gain_slice_batch(
                     forget_batch, positions
                 )
                 forget_inputs = self._gain_model_inputs(forget_batch)
-                sequence_nll, forget_outputs = compute_batch_nll(
-                    model, forget_inputs
-                )
-
-                # compute_batch_nll returns a token-summed sequence NLL. This
-                # division preserves the original SIMNPO objective exactly and
-                # is reduced only over active forget samples.
-                loss_mask = forget_inputs["labels"].ne(-100)
-                per_sample_simnpo = (
-                    sequence_nll / loss_mask.sum(-1).clamp_min(1)
-                    - self.delta
-                )
-                active_mean_forget_loss = (
-                    -F.logsigmoid(
-                        self.beta * per_sample_simnpo
-                    ).mean()
-                    * 2.0
-                    / self.beta
+                # Preserve the original WGA objective exactly. NLL gain is
+                # evaluated separately at epoch end and never replaces WGA's
+                # token-level probability weighting.
+                forget_loss, forget_outputs = compute_wga_loss(
+                    model=model,
+                    inputs=forget_inputs,
+                    beta=self.beta,
                 )
                 active_count = len(active_positions)
-                forget_scale = active_count / original_batch_size
-                forget_loss = active_mean_forget_loss * forget_scale
+                active_valid_tokens = int(
+                    forget_inputs["labels"][..., 1:].ne(-100).sum().item()
+                )
+                forget_scale = active_valid_tokens / max(
+                    original_valid_tokens, 1
+                )
+                forget_loss = forget_loss * forget_scale
 
         loss = self.alpha * retain_loss
         log_values = {
             "retain_loss": float(retain_loss.detach()),
-            "ies_simnpo_nll_gain_active_batch": active_count,
+            "ies_wga_nll_gain_active_batch": active_count,
         }
         if forget_loss is not None:
             loss = loss + self.gamma * forget_loss
             log_values["forget_loss"] = float(forget_loss.detach())
-            log_values["ies_simnpo_nll_gain_forget_scale"] = forget_scale
+            log_values["ies_wga_nll_gain_forget_scale"] = forget_scale
         self.log(log_values)
 
         if return_outputs:

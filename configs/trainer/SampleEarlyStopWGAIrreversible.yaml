@@ -1,15 +1,15 @@
 defaults:
-  - GradDiff
+  - WGA
 
-handler: SampleEarlyStopGradDiffIrreversible
+handler: SampleEarlyStopWGAIrreversible
 
 args:
   dataloader_drop_last: false
 
 method_args:
-  warm_up: 2
-  gain_threshold: 2.0
+  warm_up: 1
+  gain_threshold: 1.0
   patience: 1
-  rebound_delta: 0.2
+  rebound_delta: 0.1
   reactivation_patience: 2
   initial_nll_cache_path: null

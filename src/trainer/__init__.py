@@ -7,6 +7,7 @@ from trainer.base import FinetuneTrainer
 from trainer.unlearn.sample_early_stop_npo_loss_irreversible import SampleEarlyStopNPOLossIrreversible
 from trainer.unlearn.sample_early_stop_grad_diff_irreversible import SampleEarlyStopGradDiffIrreversible
 from trainer.unlearn.sample_early_stop_simnpo_irreversible import SampleEarlyStopSimNPOIrreversible
+from trainer.unlearn.sample_early_stop_wga_irreversible import SampleEarlyStopWGAIrreversible
 from trainer.unlearn.grad_ascent import GradAscent
 from trainer.unlearn.grad_diff import GradDiff
 from trainer.unlearn.npo import NPO, SampleEarlyStopNPO
@@ -109,6 +110,7 @@ _register_trainer(NPO)
 _register_trainer(SampleEarlyStopNPOLossIrreversible)
 _register_trainer(SampleEarlyStopGradDiffIrreversible)
 _register_trainer(SampleEarlyStopSimNPOIrreversible)
+_register_trainer(SampleEarlyStopWGAIrreversible)
 _register_trainer(SampleEarlyStopNPO)
 _register_trainer(SampleEarlyStopNPOLoss)
 _register_trainer(SampleStopNPO)

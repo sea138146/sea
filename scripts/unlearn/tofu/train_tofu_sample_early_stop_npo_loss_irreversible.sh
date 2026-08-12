@@ -89,7 +89,7 @@ for split in "${splits[@]}"; do
             read -r bsz grad_acc <<< "${bz}"
 
             for epochs in "${epoch_set[@]}"; do
-                SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}"
+                SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}_samplingbaseline_masked"
                 TASK_NAME="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${SUFFIX}"
                 OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${SUFFIX}"
                 mkdir -p "${OUTPUT_DIR}"
@@ -118,7 +118,7 @@ for split in "${splits[@]}"; do
                 echo "============================================================"
                 echo "stopping_rule=normalized_nll_gain_ge_${gain_threshold}_for_${patience}_consecutive_epochs_after_warmup_${warm_up}"
                 echo "reactivation_rule=normalized_nll_gain_le_stop_threshold_minus_${rebound_delta}_for_${reactivation_patience}_consecutive_epochs"
-                echo "data_streams=independent_forget_and_retain"
+                echo "sampling=baseline_forget_anchor_with_masked_forget_loss"
                 echo "stopped_samples=forward_only_nll_monitoring_with_reactivation"
 
                 python src/train.py --config-name=unlearn.yaml \

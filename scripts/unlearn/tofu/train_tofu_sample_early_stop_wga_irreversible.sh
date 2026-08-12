@@ -15,7 +15,7 @@ export TOKENIZERS_PARALLELISM=false
 
 MODEL_CONFIG="Llama-2-7b-chat-hf"
 MODEL_TAG="Llama-2-7b-chat-hf"
-TRAINER="SampleEarlyStopGradDiffIrreversible"
+TRAINER="SampleEarlyStopWGAIrreversible"
 
 PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
 CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
@@ -31,12 +31,13 @@ splits=(
     "forget05 holdout05 retain95 200"
     "forget10 holdout10 retain90 400"
 )
-gain_threshold_set=("1.8" "2.0" "2.2")
+gain_threshold_set=("0.5" "0.8" "1.0")
 early_stop_set=(
-    "0 1 0.2 2" # warm_up patience rebound_delta reactivation_patience
+    "0 1 0.1 2" # warm_up patience rebound_delta reactivation_patience
 )
-lr_set=("2e-5")
+lr_set=("1e-5" "2e-5" "5e-5")
 bz_set=("8 2")
+beta_set=("1.0" "5.0")
 epoch_set=("10")
 
 mkdir -p "${INITIAL_NLL_CACHE_ROOT}"
@@ -63,13 +64,14 @@ for split in "${splits[@]}"; do
             for lr in "${lr_set[@]}"; do
                 for bz in "${bz_set[@]}"; do
                     read -r bsz grad_acc <<< "${bz}"
+                    for beta in "${beta_set[@]}"; do
 
                     for epochs in "${epoch_set[@]}"; do
                         forget_batches_per_epoch=$(((num_forget_samples + bsz - 1) / bsz))
                         optimizer_steps_per_epoch=$(((forget_batches_per_epoch + grad_acc - 1) / grad_acc))
                         max_steps=$((optimizer_steps_per_epoch * epochs))
 
-                        suffix="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_ies_graddiff_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}_samplingbaseline_masked"
+                        suffix="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_e${epochs}_ies_wga_normnll_gain_ge${gain_threshold}_warm${warm_up}_patience${patience}_rebounddelta${rebound_delta}_rpat${reactivation_patience}_samplingbaseline_masked"
                         task_name="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${suffix}"
                         output_dir="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${suffix}"
                         eval_output_dir="${output_dir}/eval"
@@ -81,7 +83,7 @@ for split in "${splits[@]}"; do
 
                         echo
                         echo "============================================================"
-                        echo "GradDiff reversible sample early stopping"
+                        echo "WGA reversible sample early stopping"
                         echo "Model:       ${MODEL_TAG}"
                         echo "Split:       ${forget_split}"
                         echo "Retain:      ${retain_split}"
@@ -93,6 +95,7 @@ for split in "${splits[@]}"; do
                         echo "LR:          ${lr}"
                         echo "Batch size:  ${bsz}"
                         echo "Grad accum:  ${grad_acc}"
+                        echo "Beta:        ${beta}"
                         echo "Epochs:      ${epochs}"
                         echo "Max steps:   ${max_steps}"
                         echo "Output:      ${output_dir}"
@@ -136,7 +139,11 @@ for split in "${splits[@]}"; do
                             trainer.method_args.patience="${patience}" \
                             trainer.method_args.rebound_delta="${rebound_delta}" \
                             trainer.method_args.reactivation_patience="${reactivation_patience}" \
-                            trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}"
+                            trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}" \
+                            trainer.method_args.beta="${beta}" \
+                            trainer.method_args.alpha=1.0 \
+                            trainer.method_args.gamma=1.0 \
+                            trainer.method_args.retain_loss_type=NLL
 
                         test -f "${output_dir}/config.json" || {
                             echo "Training did not save config.json: ${output_dir}/config.json"
@@ -158,6 +165,7 @@ for split in "${splits[@]}"; do
                             retain_logs_path="${retain_logs}" \
                             task_name="${task_name}_final_eval" \
                             paths.output_dir="${eval_output_dir}"
+                    done
                     done
                 done
             done

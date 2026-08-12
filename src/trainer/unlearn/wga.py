@@ -3,6 +3,8 @@ from trainer.utils import compute_wga_loss
 
 
 class WGA(GradDiff):
+    sample_nll_log_filename = "wga_sample_normalized_nll.jsonl"
+    sample_nll_log_prefix = "[WGA-SAMPLE-NLL]"
     def __init__(self, beta=1.0, gamma=1.0, alpha=1.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.gamma = gamma
