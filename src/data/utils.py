@@ -52,6 +52,43 @@ def load_hf_dataset(path, **kwargs):
             split="train",
         )
 
+    muse_prefix = "muse-bench/MUSE-"
+    if isinstance(path, str) and path.startswith(muse_prefix):
+        data_split = path[len(muse_prefix):]
+        muse_local_dir = Path("/data/datasets/MUSE") / f"MUSE-{data_split}"
+        if muse_local_dir.is_dir():
+            kwargs = dict(kwargs)
+            name = (
+                kwargs.pop("name", None)
+                or kwargs.pop("config_name", None)
+                or kwargs.pop("subset", None)
+            )
+            split = kwargs.pop("split", None)
+            if name is None or split is None:
+                raise ValueError(
+                    "Local MUSE loading requires both a config name "
+                    "and split, for example name=raw, split=forget."
+                )
+
+            local_file = (
+                muse_local_dir
+                / str(name)
+                / f"{split}-00000-of-00001.parquet"
+            )
+            if not local_file.is_file():
+                raise FileNotFoundError(
+                    "Local MUSE split not found: "
+                    f"{local_file} (source={path!r}, "
+                    f"name={name!r}, split={split!r})"
+                )
+
+            return datasets.load_dataset(
+                "parquet",
+                data_files=str(local_file),
+                split="train",
+                **kwargs,
+            )
+
     return datasets.load_dataset(path, **kwargs)
 
 

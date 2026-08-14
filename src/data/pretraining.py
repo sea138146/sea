@@ -87,6 +87,12 @@ class PretrainingDataset(Dataset):
         return len(self.chunks)
 
     def __getitem__(self, idx):
-        return preprocess_pretraining_instance(
+        item = preprocess_pretraining_instance(
             self.tokenizer, "", self.chunks[idx], self.max_length
         )
+        # A chunk is the optimization unit for pretraining-style datasets.
+        # Expose its stable position so sample-wise monitoring/stopping can
+        # track the same chunk across epochs. Collators that do not request an
+        # index continue to discard this field, preserving baseline behavior.
+        item["index"] = idx
+        return item
