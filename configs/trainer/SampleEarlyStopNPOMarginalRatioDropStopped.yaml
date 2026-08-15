@@ -1,0 +1,18 @@
+defaults:
+  - SampleEarlyStopNPOMarginalRatio
+
+handler: SampleEarlyStopNPOMarginalRatioDropStopped
+
+method_args:
+  beta: 0.1
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+  moving_average_window: 3
+  stop_ratio_threshold: 0.1
+  rebound_ratio_threshold: 0.2
+  ratio_epsilon: 1.0e-8
+  initial_nll_cache_path: null
+
+  # Ablation: a stopped batch slot contributes neither forget nor retain loss.
+  # Active slots are averaged over the actual number of active samples.

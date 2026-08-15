@@ -24,12 +24,13 @@ CHECKPOINT_ROOT="/unlearning/experment_data/checkpoints"
 EVAL_ROOT="/model/evals"
 
 splits=(
-#    "forget01 holdout01 retain99"
-    "forget05 holdout05 retain95"
+    "forget01 holdout01 retain99"
+    # "forget05 holdout05 retain95"
 #    "forget10 holdout10 retain90"
 )
 
 lr_set=(
+    "1e-5"
     "2e-5"
     "5e-5"
 )

@@ -5,15 +5,17 @@ from transformers import Trainer, TrainingArguments
 
 from trainer.base import FinetuneTrainer
 from trainer.unlearn.sample_early_stop_npo_loss_irreversible import SampleEarlyStopNPOLossIrreversible
+from trainer.unlearn.sample_early_stop_npo_marginal_ratio import SampleEarlyStopNPOMarginalRatio
+from trainer.unlearn.sample_early_stop_npo_marginal_ratio_drop_stopped import SampleEarlyStopNPOMarginalRatioDropStopped
 from trainer.unlearn.sample_early_stop_grad_diff_irreversible import SampleEarlyStopGradDiffIrreversible
 from trainer.unlearn.sample_early_stop_simnpo_irreversible import SampleEarlyStopSimNPOIrreversible
+from trainer.unlearn.sample_early_stop_simnpo_marginal_ratio import SampleEarlyStopSimNPOMarginalRatio
 from trainer.unlearn.sample_early_stop_wga_irreversible import SampleEarlyStopWGAIrreversible
 from trainer.unlearn.grad_ascent import GradAscent
 from trainer.unlearn.grad_diff import GradDiff
 from trainer.unlearn.npo import NPO, SampleEarlyStopNPO
 from trainer.unlearn.sample_early_stop_npo_loss import SampleEarlyStopNPOLoss
 from trainer.unlearn.sample_stop_npo import SampleStopNPO
-from trainer.unlearn.sample_stop_marginal_npo import SampleStopMarginalNPO
 from trainer.unlearn.dpo import DPO
 from trainer.unlearn.simnpo import SimNPO
 from trainer.unlearn.rmu import RMU
@@ -108,13 +110,15 @@ _register_trainer(GradAscent)
 _register_trainer(GradDiff)
 _register_trainer(NPO)
 _register_trainer(SampleEarlyStopNPOLossIrreversible)
+_register_trainer(SampleEarlyStopNPOMarginalRatio)
+_register_trainer(SampleEarlyStopNPOMarginalRatioDropStopped)
 _register_trainer(SampleEarlyStopGradDiffIrreversible)
 _register_trainer(SampleEarlyStopSimNPOIrreversible)
+_register_trainer(SampleEarlyStopSimNPOMarginalRatio)
 _register_trainer(SampleEarlyStopWGAIrreversible)
 _register_trainer(SampleEarlyStopNPO)
 _register_trainer(SampleEarlyStopNPOLoss)
 _register_trainer(SampleStopNPO)
-_register_trainer(SampleStopMarginalNPO)
 _register_trainer(DPO)
 _register_trainer(SimNPO)
 _register_trainer(RMU)
