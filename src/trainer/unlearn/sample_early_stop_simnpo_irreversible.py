@@ -239,15 +239,20 @@ class SampleEarlyStopSimNPOIrreversible(SimNPO):
                 forget_loss = active_mean_forget_loss * forget_scale
 
         loss = self.alpha * retain_loss
-        log_values = {
-            "retain_loss": float(retain_loss.detach()),
-            "ies_simnpo_nll_gain_active_batch": active_count,
-        }
         if forget_loss is not None:
             loss = loss + self.gamma * forget_loss
-            log_values["forget_loss"] = float(forget_loss.detach())
-            log_values["ies_simnpo_nll_gain_forget_scale"] = forget_scale
-        self.log(log_values)
+
+        if getattr(self, "log_step_details", True):
+            log_values = {
+                "retain_loss": float(retain_loss.detach()),
+                "ies_simnpo_nll_gain_active_batch": active_count,
+            }
+            if forget_loss is not None:
+                log_values["forget_loss"] = float(forget_loss.detach())
+                log_values["ies_simnpo_nll_gain_forget_scale"] = (
+                    forget_scale
+                )
+            self.log(log_values)
 
         if return_outputs:
             return loss, forget_outputs

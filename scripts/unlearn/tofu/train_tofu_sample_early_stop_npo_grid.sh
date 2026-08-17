@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source /opt/conda/etc/profile.d/conda.sh
+conda activate openunlearning
+
 export CUDA_VISIBLE_DEVICES=0
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export WANDB_DISABLED=true
+export PYTHONUNBUFFERED=1
+export HYDRA_FULL_ERROR=1
+export TOKENIZERS_PARALLELISM=false
 
 MODEL_CONFIG="Llama-2-7b-chat-hf"
 MODEL_TAG="Llama-2-7b-chat-hf"
@@ -12,9 +22,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 splits=(
-    "forget01 holdout01 retain99"
-    # "forget05 holdout05 retain95"
-    # "forget10 holdout10 retain90"
+    "forget10 holdout10 retain90"
 )
 
 PRETRAINED_PATH="/model/finetune_models/tofu_Llama-2-7b-chat-hf_full"
@@ -23,12 +31,12 @@ EVAL_ROOT="/model/evals"
 INITIAL_NLL_CACHE_ROOT="${CHECKPOINT_ROOT}/tofu/initial_nll/${MODEL_TAG}"
 
 # Controller grid. The first experiment uses the proposed defaults.
-moving_average_window_set=("3")
-stop_ratio_threshold_set=("0.05" "0.1" "0.2")
-rebound_ratio_threshold_set=("0.2")
+moving_average_window_set=("2")
+stop_ratio_threshold_set=("0.15" "0.20")
+rebound_ratio_threshold_set=("0.1")
 ratio_epsilon="1e-8"
 
-lr_set=("1e-5" "2e-5" "5e-5")
+lr_set=("2e-5" "5e-5")
 bz_set=("4 2")
 epoch_set=("10")
 
@@ -56,9 +64,15 @@ for split in "${splits[@]}"; do
     for bz in "${bz_set[@]}"; do
         read -r bsz grad_acc <<< "${bz}"
         for epochs in "${epoch_set[@]}"; do
-            SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_marginalratio_ma${moving_average_window}_stop${stop_ratio_threshold}_rebound${rebound_ratio_threshold}_samplingbaseline_masked"
+            SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_marginalratio_ma${moving_average_window}_stop${stop_ratio_threshold}_rebound${rebound_ratio_threshold}_marginalrecovery_fullretain_fixed_forget_denom"
             TASK_NAME="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${SUFFIX}"
             OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${SUFFIX}"
+            EVAL_OUTPUT_DIR="${OUTPUT_DIR}/eval"
+
+            if [[ -f "${EVAL_OUTPUT_DIR}/TOFU_SUMMARY.json" ]]; then
+                echo "跳过已完成实验：${TASK_NAME}"
+                continue
+            fi
             mkdir -p "${OUTPUT_DIR}"
 
             echo
@@ -69,17 +83,19 @@ for split in "${splits[@]}"; do
             echo "epochs=${epochs} moving_average_window=${moving_average_window}"
             echo "stop_ratio_threshold=${stop_ratio_threshold}"
             echo "rebound_ratio_threshold=${rebound_ratio_threshold}"
-            echo "sampling=baseline_forget_anchor_with_masked_forget_loss"
+            echo "stopped_forget_gradient=zero retain_batch=full forget_denominator=original_batch_size"
             echo "output_dir=${OUTPUT_DIR}"
             echo "============================================================"
 
-            python src/train.py --config-name=unlearn.yaml \
+            python -u src/train.py --config-name=unlearn.yaml \
                 experiment=unlearn/tofu/default \
                 trainer="${TRAINER}" \
                 collator=DataCollatorForSupervisedDatasetwithIndex \
                 model="${MODEL_CONFIG}" \
                 model.model_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
+                +model.model_args.local_files_only=true \
                 model.tokenizer_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
+                +model.tokenizer_args.local_files_only=true \
                 forget_split="${forget_split}" \
                 holdout_split="${holdout_split}" \
                 retain_split="${retain_split}" \
@@ -92,6 +108,7 @@ for split in "${splits[@]}"; do
                 trainer.args.do_train=true \
                 trainer.args.do_eval=false \
                 trainer.args.logging_steps=1 \
+                trainer.args.save_strategy=no \
                 trainer.args.learning_rate="${lr}" \
                 trainer.args.per_device_train_batch_size="${bsz}" \
                 trainer.args.gradient_accumulation_steps="${grad_acc}" \
@@ -111,7 +128,6 @@ for split in "${splits[@]}"; do
             fi
 
             EVAL_TASK_NAME="${TASK_NAME}_final_eval"
-            EVAL_OUTPUT_DIR="${OUTPUT_DIR}/eval"
             rm -rf "${EVAL_OUTPUT_DIR}"
             mkdir -p "${EVAL_OUTPUT_DIR}"
 
@@ -119,7 +135,9 @@ for split in "${splits[@]}"; do
                 experiment=eval/tofu/default \
                 model="${MODEL_CONFIG}" \
                 model.model_args.pretrained_model_name_or_path="${OUTPUT_DIR}" \
+                +model.model_args.local_files_only=true \
                 model.tokenizer_args.pretrained_model_name_or_path="${PRETRAINED_PATH}" \
+                +model.tokenizer_args.local_files_only=true \
                 forget_split="${forget_split}" \
                 holdout_split="${holdout_split}" \
                 retain_logs_path="${retain_eval_file}" \

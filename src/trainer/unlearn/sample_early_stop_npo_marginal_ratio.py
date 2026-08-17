@@ -12,7 +12,10 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
     """NPO with self-normalized marginal-progress stopping and rebound.
 
     The NPO objective, forget-anchored sampler, retain updates, and stopped
-    sample loss masking are unchanged. Only the sample controller differs.
+    sample loss masking are unchanged. Active samples stop when their marginal
+    forgetting moving average decays relative to the global historical peak.
+    Stopped samples reactivate when their marginal recovery moving average
+    grows relative to that same peak. The historical peak is never reset.
     """
 
     _NLLGainEpochEndCallback = (
@@ -124,6 +127,12 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
         self.historical_max_moving_average = {
             i: None for i in self.all_sample_indices
         }
+        self.stopped_recovery_gain_history = {
+            i: [] for i in self.all_sample_indices
+        }
+        self.stopped_recovery_moving_average_history = {
+            i: [] for i in self.all_sample_indices
+        }
         self.transition_history = {
             i: [] for i in self.all_sample_indices
         }
@@ -158,6 +167,7 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
             f"rebound_ratio_threshold={self.rebound_ratio_threshold} "
             f"ratio_epsilon={self.ratio_epsilon} "
             "stop_patience=1 rebound_patience=1 "
+            "rebound_signal=stopped_recovery_ma_over_historical_peak "
             "sampling=baseline_forget_anchor_masked",
             flush=True,
         )
@@ -250,6 +260,8 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
             stopped_now = metrics["stop_threshold_hit"]
             if stopped_now:
                 newly_stopped.append(index)
+                self.stopped_recovery_gain_history[index] = []
+                self.stopped_recovery_moving_average_history[index] = []
                 self.stop_epoch[index] = completed_epoch
                 self.stop_nll[index] = current_nll
                 self.stop_progress[index] = progress
@@ -301,10 +313,34 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
             self.epoch_gain_history[index].append(epoch_gain)
 
             progress_at_stop = self.stop_progress[index]
-            progress_lost = max(self.stop_nll[index] - current_nll, 0.0)
-            rebound_eligible = progress_at_stop > self.ratio_epsilon
+            recovery_gain = float(previous_nll - current_nll)
+            recovery_history = self.stopped_recovery_gain_history[index]
+            recovery_history.append(recovery_gain)
+            enough_recovery_gains = (
+                len(recovery_history) >= self.moving_average_window
+            )
+            recovery_moving_average = None
+            if enough_recovery_gains:
+                recovery_window = recovery_history[
+                    -self.moving_average_window:
+                ]
+                recovery_moving_average = float(
+                    sum(recovery_window) / len(recovery_window)
+                )
+                self.stopped_recovery_moving_average_history[index].append(
+                    recovery_moving_average
+                )
+
+            historical_peak = self.historical_max_moving_average[index]
+            positive_peak_exists = (
+                historical_peak is not None and historical_peak > 0.0
+            )
+            rebound_eligible = (
+                enough_recovery_gains and positive_peak_exists
+            )
             rebound_ratio = (
-                progress_lost / (progress_at_stop + self.ratio_epsilon)
+                max(recovery_moving_average, 0.0)
+                / (historical_peak + self.ratio_epsilon)
                 if rebound_eligible
                 else None
             )
@@ -321,7 +357,15 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
                         "epoch": completed_epoch,
                         "length_normalized_sample_nll": current_nll,
                         "forgetting_progress_at_stop": progress_at_stop,
-                        "forgetting_progress_lost": progress_lost,
+                        "recovery_gain": recovery_gain,
+                        "recovery_moving_average_gain": (
+                            recovery_moving_average
+                        ),
+                        "historical_max_moving_average_gain": (
+                            historical_peak
+                        ),
+                        "recovery_gain_count": len(recovery_history),
+                        "enough_recovery_gains": enough_recovery_gains,
                         "rebound_ratio": rebound_ratio,
                     }
                 )
@@ -336,7 +380,11 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
                 "stop_epoch": self.stop_epoch[index],
                 "stop_nll": self.stop_nll[index],
                 "forgetting_progress_at_stop": progress_at_stop,
-                "forgetting_progress_lost": progress_lost,
+                "recovery_gain": recovery_gain,
+                "recovery_moving_average_gain": recovery_moving_average,
+                "historical_max_moving_average_gain": historical_peak,
+                "recovery_gain_count": len(recovery_history),
+                "enough_recovery_gains": enough_recovery_gains,
                 "rebound_eligible": rebound_eligible,
                 "rebound_ratio": rebound_ratio,
                 "rebound_threshold_hit": reactivation_hit,
@@ -373,15 +421,24 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
             "stop_ratio_threshold": self.stop_ratio_threshold,
             "stop_comparison": "marginal_forgetting_ratio < threshold",
             "stop_patience": 1,
+            "recovery_gain_definition": (
+                "previous_normalized_nll - current_normalized_nll"
+            ),
             "rebound_ratio_definition": (
-                "max(stop_nll-current_nll,0) / "
-                "(max(stop_nll-initial_nll,0) + epsilon)"
+                "max(recovery_moving_average,0) / "
+                "(max(historical_max_moving_average,0) + epsilon)"
             ),
             "rebound_ratio_threshold": self.rebound_ratio_threshold,
             "reactivation_comparison": "rebound_ratio > threshold",
             "reactivation_patience": 1,
             "ratio_epsilon": self.ratio_epsilon,
             "rebound_enabled": True,
+            "rebound_signal": (
+                "stopped_recovery_moving_average_over_global_"
+                "historical_forgetting_peak"
+            ),
+            "historical_peak_reset_on_reactivation": False,
+            "recovery_window_reset_on_stop": True,
             "sampling_mode": "baseline_forget_anchor_masked",
             "active": len(self.active_samples),
             "stopped": len(self.stopped_samples),
@@ -426,6 +483,14 @@ class SampleEarlyStopNPOMarginalRatio(NPO):
                 ),
                 "historical_max_moving_average": self._string_keys(
                     self.historical_max_moving_average
+                ),
+                "stopped_recovery_gain_history": self._string_keys(
+                    self.stopped_recovery_gain_history
+                ),
+                "stopped_recovery_moving_average_history": (
+                    self._string_keys(
+                        self.stopped_recovery_moving_average_history
+                    )
                 ),
                 "transition_history": self._string_keys(
                     self.transition_history

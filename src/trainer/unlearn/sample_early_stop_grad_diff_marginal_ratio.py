@@ -2,19 +2,19 @@ import json
 import math
 import os
 
-from trainer.unlearn.simnpo import SimNPO
-from trainer.unlearn.sample_early_stop_simnpo_irreversible import (
-    SampleEarlyStopSimNPOIrreversible,
+from trainer.unlearn.grad_diff import GradDiff
+from trainer.unlearn.sample_early_stop_grad_diff_irreversible import (
+    SampleEarlyStopGradDiffIrreversible,
 )
 from trainer.unlearn.sample_early_stop_npo_loss_irreversible import (
     SampleEarlyStopNPOLossIrreversible,
 )
 
 
-class SampleEarlyStopSimNPOMarginalRatio(SimNPO):
-    """SimNPO with self-normalized marginal-progress stopping and rebound.
+class SampleEarlyStopGradDiffMarginalRatio(GradDiff):
+    """GradDiff with self-normalized marginal-progress stopping and rebound.
 
-    The SimNPO objective, forget-anchored sampler, retain updates, and stopped
+    The GradDiff objective, forget-anchored sampler, retain updates, and stopped
     sample loss masking are unchanged. Active samples stop when their marginal
     forgetting moving average decays relative to the global historical peak.
     Stopped samples reactivate when their marginal recovery moving average
@@ -52,7 +52,7 @@ class SampleEarlyStopSimNPOMarginalRatio(SimNPO):
     get_train_dataloader = (
         SampleEarlyStopNPOLossIrreversible.get_train_dataloader
     )
-    compute_loss = SampleEarlyStopSimNPOIrreversible.compute_loss
+    compute_loss = SampleEarlyStopGradDiffIrreversible.compute_loss
 
     def __init__(
         self,
@@ -61,13 +61,11 @@ class SampleEarlyStopSimNPOMarginalRatio(SimNPO):
         rebound_ratio_threshold=0.2,
         ratio_epsilon=1e-8,
         initial_nll_cache_path=None,
-        log_step_details=False,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.log_step_details = bool(log_step_details)
-        self._nll_gain_log_prefix = "[SIMNPO-MARGINAL-RATIO]"
+        self._nll_gain_log_prefix = "[GRADDIFF-MARGINAL-RATIO]"
         self.moving_average_window = int(moving_average_window)
         self.stop_ratio_threshold = float(stop_ratio_threshold)
         self.rebound_ratio_threshold = float(rebound_ratio_threshold)
@@ -87,11 +85,11 @@ class SampleEarlyStopSimNPOMarginalRatio(SimNPO):
             raise ValueError("ratio_epsilon must be positive")
         if self.accelerator.num_processes != 1:
             raise RuntimeError(
-                "SampleEarlyStopSimNPOMarginalRatio supports one process"
+                "SampleEarlyStopGradDiffMarginalRatio supports one process"
             )
         if int(self.args.dataloader_num_workers) != 0:
             raise RuntimeError(
-                "SampleEarlyStopSimNPOMarginalRatio requires "
+                "SampleEarlyStopGradDiffMarginalRatio requires "
                 "dataloader_num_workers=0"
             )
         if not hasattr(self.train_dataset, "forget") or not hasattr(
@@ -152,13 +150,13 @@ class SampleEarlyStopSimNPOMarginalRatio(SimNPO):
 
         os.makedirs(self.args.output_dir, exist_ok=True)
         self.initial_state_path = os.path.join(
-            self.args.output_dir, "ies_simnpo_marginal_ratio_initial_state.json"
+            self.args.output_dir, "ies_grad_diff_marginal_ratio_initial_state.json"
         )
         self.history_path = os.path.join(
-            self.args.output_dir, "ies_simnpo_marginal_ratio_history.jsonl"
+            self.args.output_dir, "ies_grad_diff_marginal_ratio_history.jsonl"
         )
         self.state_path = os.path.join(
-            self.args.output_dir, "ies_simnpo_marginal_ratio_state.json"
+            self.args.output_dir, "ies_grad_diff_marginal_ratio_state.json"
         )
         if self.is_world_process_zero():
             open(self.history_path, "w", encoding="utf-8").close()
@@ -513,11 +511,11 @@ class SampleEarlyStopSimNPOMarginalRatio(SimNPO):
 
         self.log(
             {
-                "simnpo_marginal_ratio_active": len(self.active_samples),
-                "simnpo_marginal_ratio_stopped": len(self.stopped_samples),
-                "simnpo_marginal_ratio_newly_stopped": len(newly_stopped),
-                "simnpo_marginal_ratio_reactivated": len(reactivated),
-                "simnpo_marginal_ratio_saved_forget_total": (
+                "grad_diff_marginal_ratio_active": len(self.active_samples),
+                "grad_diff_marginal_ratio_stopped": len(self.stopped_samples),
+                "grad_diff_marginal_ratio_newly_stopped": len(newly_stopped),
+                "grad_diff_marginal_ratio_reactivated": len(reactivated),
+                "grad_diff_marginal_ratio_saved_forget_total": (
                     self._saved_forget_instances
                 ),
             }

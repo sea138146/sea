@@ -22,3 +22,6 @@ method_args:
   # Stopped samples keep their baseline batch slots but contribute no forget
   # gradient. Retain updates continue, and all forget samples receive one
   # forward-only normalized-NLL snapshot at every epoch end.
+  # Rebound uses the stopped-sample recovery-gain moving average divided by
+  # the global historical maximum forgetting-gain moving average. The global
+  # historical maximum is retained across stop/reactivation cycles.

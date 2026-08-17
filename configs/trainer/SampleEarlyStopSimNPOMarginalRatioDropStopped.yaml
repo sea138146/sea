@@ -1,0 +1,25 @@
+defaults:
+  - SimNPO
+
+handler: SampleEarlyStopSimNPOMarginalRatioDropStopped
+
+args:
+  dataloader_drop_last: false
+  dataloader_num_workers: 0
+
+method_args:
+  delta: 0.0
+  beta: 4.5
+  alpha: 1.0
+  gamma: 0.125
+  log_per_sample_normalized_nll: false
+  retain_loss_type: NLL
+
+  moving_average_window: 3
+  stop_ratio_threshold: 0.1
+  rebound_ratio_threshold: 0.2
+  ratio_epsilon: 1.0e-8
+  initial_nll_cache_path: null
+
+  # A stopped batch slot contributes neither forget nor retain loss. Active
+  # losses retain the original forget-batch and retain-token denominators.

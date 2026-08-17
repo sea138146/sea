@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-08-16T07:18:25.193685+00:00",
+  "scope": "TOFU / Llama-2-7b-chat-hf / NPO family / completed TOFU_SUMMARY.json only",
+  "row_counts": {
+    "forget01": 38,
+    "forget05": 37,
+    "forget10": 32
+  },
+  "total_rows": 107,
+  "files": [
+    "/unlearning/experment_data/open-unlearning/reports/tofu_npo_results_20260816/tofu_npo_results_3sheets.xlsx",
+    "/unlearning/experment_data/open-unlearning/reports/tofu_npo_results_20260816/tofu_npo_all_results.csv",
+    "/unlearning/experment_data/open-unlearning/reports/tofu_npo_results_20260816/tofu_npo_forget01.csv",
+    "/unlearning/experment_data/open-unlearning/reports/tofu_npo_results_20260816/tofu_npo_forget05.csv",
+    "/unlearning/experment_data/open-unlearning/reports/tofu_npo_results_20260816/tofu_npo_forget10.csv"
+  ],
+  "notes": [
+    "CSV cannot contain sheets; the XLSX workbook contains the three requested sheets.",
+    "No completed run was deduplicated; _old copies are marked by is_old_copy.",
+    "Missing trajectory/runtime values are blank, not zero."
+  ]
+}

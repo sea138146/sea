@@ -15,15 +15,13 @@ export TOKENIZERS_PARALLELISM=false
 
 MODEL_CONFIG="Llama-2-7b-chat-hf"
 MODEL_TAG="Llama-2-7b-chat-hf"
-TRAINER="SampleEarlyStopSimNPOMarginalRatioDropStopped"
-VARIANT_SUFFIX="dropstopped_fixed_baseline_denoms_no_retain_recovery"
+TRAINER="SampleEarlyStopGradDiffMarginalRatio"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 splits=(
- #   "forget01 holdout01 retain99"
     "forget05 holdout05 retain95"
     "forget10 holdout10 retain90"
 )
@@ -35,15 +33,12 @@ INITIAL_NLL_CACHE_ROOT="${CHECKPOINT_ROOT}/tofu/initial_nll/${MODEL_TAG}"
 
 # Controller grid. The first experiment uses the proposed defaults.
 moving_average_window_set=("2")
-stop_ratio_threshold_set=("0.1" "0.15" "0.20")
+stop_ratio_threshold_set=("0.40" "0.50")
 rebound_ratio_threshold_set=("0.1")
 ratio_epsilon="1e-8"
 
-lr_set=("2e-5" "5e-5")
-bz_set=("4 2" "8 2")
-beta_set=("3.5")
-delta_set=("1")
-gamma_set=("0.25")
+lr_set=("2e-5")
+bz_set=("8 2" "8 4")
 epoch_set=("10")
 
 mkdir -p "${CHECKPOINT_ROOT}" "${EVAL_ROOT}" "${INITIAL_NLL_CACHE_ROOT}"
@@ -69,11 +64,8 @@ for split in "${splits[@]}"; do
     for lr in "${lr_set[@]}"; do
     for bz in "${bz_set[@]}"; do
         read -r bsz grad_acc <<< "${bz}"
-        for beta in "${beta_set[@]}"; do
-        for delta in "${delta_set[@]}"; do
-        for gamma in "${gamma_set[@]}"; do
         for epochs in "${epoch_set[@]}"; do
-            SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_beta${beta}_delta${delta}_gamma${gamma}_e${epochs}_marginalratio_ma${moving_average_window}_stop${stop_ratio_threshold}_rebound${rebound_ratio_threshold}_${VARIANT_SUFFIX}"
+            SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_marginalratio_ma${moving_average_window}_stop${stop_ratio_threshold}_rebound${rebound_ratio_threshold}_marginalrecovery_fullretain_fixed_forget_token_denom"
             TASK_NAME="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${SUFFIX}"
             OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${SUFFIX}"
             EVAL_OUTPUT_DIR="${OUTPUT_DIR}/eval"
@@ -82,20 +74,17 @@ for split in "${splits[@]}"; do
                 echo "跳过已完成实验：${TASK_NAME}"
                 continue
             fi
-
             mkdir -p "${OUTPUT_DIR}"
 
             echo
             echo "============================================================"
-            echo "开始 SimNPO marginal-ratio DropStopped 训练：${TASK_NAME}"
+            echo "开始 GradDiff marginal-ratio 训练：${TASK_NAME}"
             echo "forget_split=${forget_split} retain_split=${retain_split}"
             echo "learning_rate=${lr} batch_size=${bsz} grad_acc=${grad_acc}"
             echo "epochs=${epochs} moving_average_window=${moving_average_window}"
-            echo "beta=${beta} delta=${delta} gamma=${gamma}"
             echo "stop_ratio_threshold=${stop_ratio_threshold}"
             echo "rebound_ratio_threshold=${rebound_ratio_threshold}"
-            echo "sampling=drop_stopped_forget_and_paired_retain_slots"
-            echo "normalization=forget_original_batch_retain_original_token_count"
+            echo "stopped_forget_gradient=zero retain_batch=full forget_denominator=original_valid_tokens"
             echo "output_dir=${OUTPUT_DIR}"
             echo "============================================================"
 
@@ -119,7 +108,8 @@ for split in "${splits[@]}"; do
                 trainer.args.report_to=none \
                 trainer.args.do_train=true \
                 trainer.args.do_eval=false \
-                trainer.args.logging_steps=1 \
+                trainer.args.logging_steps=10 \
+                +trainer.args.disable_tqdm=true \
                 trainer.args.save_strategy=no \
                 trainer.args.learning_rate="${lr}" \
                 trainer.args.per_device_train_batch_size="${bsz}" \
@@ -132,13 +122,7 @@ for split in "${splits[@]}"; do
                 trainer.method_args.stop_ratio_threshold="${stop_ratio_threshold}" \
                 trainer.method_args.rebound_ratio_threshold="${rebound_ratio_threshold}" \
                 trainer.method_args.ratio_epsilon="${ratio_epsilon}" \
-                trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}" \
-                trainer.method_args.beta="${beta}" \
-                trainer.method_args.delta="${delta}" \
-                trainer.method_args.gamma="${gamma}" \
-                trainer.method_args.alpha=1.0 \
-                trainer.method_args.retain_loss_type=NLL \
-                trainer.method_args.log_per_sample_normalized_nll=false
+                trainer.method_args.initial_nll_cache_path="${initial_nll_cache_file}"
 
             if [[ ! -f "${OUTPUT_DIR}/config.json" ]]; then
                 echo "错误：训练结束后没有找到最终模型：${OUTPUT_DIR}/config.json"
@@ -166,9 +150,6 @@ for split in "${splits[@]}"; do
             find "${EVAL_OUTPUT_DIR}" -maxdepth 2 -type f \
                 \( -name "TOFU_EVAL.json" -o -name "TOFU_SUMMARY.json" \) \
                 -print
-        done
-        done
-        done
         done
     done
     done

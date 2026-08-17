@@ -15,8 +15,8 @@ export TOKENIZERS_PARALLELISM=false
 
 MODEL_CONFIG="Llama-2-7b-chat-hf"
 MODEL_TAG="Llama-2-7b-chat-hf"
-TRAINER="SampleEarlyStopSimNPOMarginalRatioDropStopped"
-VARIANT_SUFFIX="dropstopped_fixed_baseline_denoms_no_retain_recovery"
+TRAINER="SampleEarlyStopSimNPOMarginalRatio"
+VARIANT_SUFFIX="fullretain_fixed_forget_denom"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -87,15 +87,15 @@ for split in "${splits[@]}"; do
 
             echo
             echo "============================================================"
-            echo "开始 SimNPO marginal-ratio DropStopped 训练：${TASK_NAME}"
+            echo "开始 SimNPO marginal-ratio FullRetain 训练：${TASK_NAME}"
             echo "forget_split=${forget_split} retain_split=${retain_split}"
             echo "learning_rate=${lr} batch_size=${bsz} grad_acc=${grad_acc}"
             echo "epochs=${epochs} moving_average_window=${moving_average_window}"
             echo "beta=${beta} delta=${delta} gamma=${gamma}"
             echo "stop_ratio_threshold=${stop_ratio_threshold}"
             echo "rebound_ratio_threshold=${rebound_ratio_threshold}"
-            echo "sampling=drop_stopped_forget_and_paired_retain_slots"
-            echo "normalization=forget_original_batch_retain_original_token_count"
+            echo "sampling=baseline_forget_anchor_with_stopped_forget_masked"
+            echo "normalization=forget_original_batch_retain_full_baseline_mean"
             echo "output_dir=${OUTPUT_DIR}"
             echo "============================================================"
 
@@ -119,7 +119,8 @@ for split in "${splits[@]}"; do
                 trainer.args.report_to=none \
                 trainer.args.do_train=true \
                 trainer.args.do_eval=false \
-                trainer.args.logging_steps=1 \
+                trainer.args.logging_steps=10 \
+                +trainer.args.disable_tqdm=true \
                 trainer.args.save_strategy=no \
                 trainer.args.learning_rate="${lr}" \
                 trainer.args.per_device_train_batch_size="${bsz}" \

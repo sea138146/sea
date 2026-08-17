@@ -58,7 +58,7 @@ for split in "${splits[@]}"; do
     for bz in "${bz_set[@]}"; do
         read -r bsz grad_acc <<< "${bz}"
         for epochs in "${epoch_set[@]}"; do
-            SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_marginalratio_ma${moving_average_window}_stop${stop_ratio_threshold}_rebound${rebound_ratio_threshold}_${VARIANT_SUFFIX}"
+            SUFFIX="lr${lr}_b${bsz}_ga${grad_acc}_e${epochs}_marginalratio_ma${moving_average_window}_stop${stop_ratio_threshold}_rebound${rebound_ratio_threshold}_marginalrecovery_${VARIANT_SUFFIX}"
             TASK_NAME="unlearn_tofu_${MODEL_TAG}_${forget_split}_${TRAINER}_${SUFFIX}"
             OUTPUT_DIR="${CHECKPOINT_ROOT}/tofu/${forget_split}/${MODEL_TAG}/${TRAINER}/${SUFFIX}"
             EVAL_OUTPUT_DIR="${OUTPUT_DIR}/eval"

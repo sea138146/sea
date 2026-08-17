@@ -14,5 +14,6 @@ method_args:
   ratio_epsilon: 1.0e-8
   initial_nll_cache_path: null
 
-  # Ablation: a stopped batch slot contributes neither forget nor retain loss.
-  # Active slots are averaged over the actual number of active samples.
+  # Ablation: a stopped batch slot contributes neither forget nor paired
+  # retain loss. The controller and marginal-recovery rebound rule are
+  # inherited from SampleEarlyStopNPOMarginalRatio.

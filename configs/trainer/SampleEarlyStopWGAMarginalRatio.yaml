@@ -1,0 +1,19 @@
+defaults:
+  - WGA
+
+handler: SampleEarlyStopWGAMarginalRatio
+
+args:
+  dataloader_drop_last: false
+  dataloader_num_workers: 0
+
+method_args:
+  beta: 1.0
+  alpha: 1.0
+  gamma: 1.0
+  retain_loss_type: NLL
+  moving_average_window: 2
+  stop_ratio_threshold: 0.1
+  rebound_ratio_threshold: 0.1
+  ratio_epsilon: 1.0e-8
+  initial_nll_cache_path: null

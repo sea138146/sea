@@ -1,0 +1,19 @@
+defaults:
+  - GradDiff
+
+handler: SampleEarlyStopGradDiffMarginalRatio
+
+args:
+  dataloader_drop_last: false
+  dataloader_num_workers: 0
+
+method_args:
+  moving_average_window: 2
+  stop_ratio_threshold: 0.1
+  rebound_ratio_threshold: 0.1
+  ratio_epsilon: 1.0e-8
+  initial_nll_cache_path: null
+
+  # Baseline GradDiff alpha, gamma, retain loss, loader, and random retain
+  # pairing are inherited unchanged. Stopped samples contribute zero forget
+  # gradient using the original valid-token denominator; retain stays full.
