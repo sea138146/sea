@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-08-18",
+  "checkpoint_root": "/unlearning/experment_data/checkpoints/tofu",
+  "completed_rows": 85,
+  "counts": {
+    "forget01|absolute_nll_gain": 28,
+    "forget01|baseline": 6,
+    "forget05|absolute_nll_gain": 18,
+    "forget05|baseline": 6,
+    "forget05|marginal_ratio": 2,
+    "forget10|absolute_nll_gain": 18,
+    "forget10|baseline": 5,
+    "forget10|marginal_ratio": 2
+  },
+  "files": [
+    "tofu_wga_all_results.csv",
+    "tofu_wga_forget01.csv",
+    "tofu_wga_forget05.csv",
+    "tofu_wga_forget10.csv"
+  ],
+  "note": "All completed TOFU WGA runs with eval/TOFU_SUMMARY.json. Legacy runs whose naming does not encode denominator/retain semantics are marked legacy_or_unspecified. Excel was not generated because no openpyxl/xlsxwriter engine is installed."
+}

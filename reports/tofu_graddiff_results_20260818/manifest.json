@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-08-18",
+  "checkpoint_root": "/unlearning/experment_data/checkpoints/tofu",
+  "completed_rows": 153,
+  "counts": {
+    "forget01|absolute_nll_gain": 21,
+    "forget01|baseline": 17,
+    "forget01|second_difference": 9,
+    "forget05|absolute_nll_gain": 12,
+    "forget05|baseline": 26,
+    "forget05|marginal_ratio": 16,
+    "forget10|absolute_nll_gain": 12,
+    "forget10|baseline": 24,
+    "forget10|marginal_ratio": 16
+  },
+  "files": [
+    "tofu_graddiff_all_results.csv",
+    "tofu_graddiff_forget01.csv",
+    "tofu_graddiff_forget05.csv",
+    "tofu_graddiff_forget10.csv"
+  ],
+  "note": "All completed TOFU GradDiff runs with eval/TOFU_SUMMARY.json; controller families remain separated. Missing trajectory/runtime fields mean those artifacts were cleaned or were not produced."
+}
